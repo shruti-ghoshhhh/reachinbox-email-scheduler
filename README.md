@@ -378,6 +378,12 @@ Deterministic tests cover stale-row recovery, concurrent scans, enqueue failure 
 
 Run the backend checks with `cd backend && npm run test:delivery-guarantees && npm run test:queue-recovery && npm run test:rate-limit`. These tests use isolated in-memory collaborators; they do not modify the local Docker database or send email.
 
+### Queue load check
+
+Run `cd backend && npm run test:queue-load` with Redis available at `REDIS_HOST`/`REDIS_PORT` (defaults to `localhost:6379`). The test creates a unique BullMQ queue name and Redis prefix for each run, uses a mock processor with no SMTP, PostgreSQL, Slack, or Elasticsearch access, and removes only that isolated queue on exit. It enqueues 1,200 jobs individually, drains them with concurrency 20, and verifies every unique job reaches BullMQ's completed state with none waiting, active, delayed, or failed. It also checks a simulated schedule for three senders at 100 jobs/hour and 10 ms minimum spacing; this schedule spans 4 hourly buckets per sender (12 total).
+
+On the local Docker Redis run on 2026-10-24, enqueue took 2,224 ms (about 540 jobs/s), and the worker drained 1,200 jobs in 691 ms after the queue was filled (about 1,737 jobs/s). All 1,200 completed, zero failed, and zero SMTP calls occurred. These are local single-run measurements, not a production capacity guarantee. The check exercises real BullMQ/Redis persistence and draining, but uses a mock processor and verifies a modeled schedule; it does not exercise the live API, PostgreSQL reconciliation, the worker's SMTP path, or real waiting across the simulated 3-hour, 990 ms schedule span.
+
 ---
 
 ### Rate limit counter — no decrement on rate-limited path

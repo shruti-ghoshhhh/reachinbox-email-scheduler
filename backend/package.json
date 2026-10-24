@@ -9,6 +9,7 @@
     "test:rate-limit": "node --test -r ts-node/register test/rateLimitService.test.cjs",
     "test:queue-recovery": "node --test -r ts-node/register test/emailQueueRecovery.test.cjs",
     "test:delivery-guarantees": "node --test -r ts-node/register test/deliveryGuarantees.test.cjs",
+    "test:queue-load": "node --test test/emailQueueLoad.test.cjs",
     "start": "node dist/server.js",
     "worker": "ts-node-dev --respawn --transpile-only src/workers/emailWorker.ts",
     "prisma:generate": "prisma generate",
