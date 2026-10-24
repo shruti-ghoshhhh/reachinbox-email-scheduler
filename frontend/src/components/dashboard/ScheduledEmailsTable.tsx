@@ -2,12 +2,11 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { format } from 'date-fns';
-import { ExternalLink, Search, RefreshCw, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Search, RefreshCw, ChevronLeft, ChevronRight } from 'lucide-react';
 import { api } from '@/lib/api';
 import { EmailJob, PaginatedResponse } from '@/types';
 import StatusBadge from '@/components/ui/StatusBadge';
 import EmptyState from '@/components/ui/EmptyState';
-import LoadingSpinner from '@/components/ui/LoadingSpinner';
 
 interface ScheduledTableProps {
   refreshTrigger?: number;
@@ -28,6 +27,7 @@ function SkeletonRow() {
 export default function ScheduledEmailsTable({ refreshTrigger }: ScheduledTableProps) {
   const [emails, setEmails] = useState<EmailJob[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState('');
@@ -37,6 +37,7 @@ export default function ScheduledEmailsTable({ refreshTrigger }: ScheduledTableP
 
   const fetchEmails = useCallback(async () => {
     setIsLoading(true);
+    setLoadError(false);
     try {
       const params = new URLSearchParams({
         page: String(page),
@@ -52,13 +53,16 @@ export default function ScheduledEmailsTable({ refreshTrigger }: ScheduledTableP
       }
     } catch {
       setEmails([]);
+      setTotal(0);
+      setLoadError(true);
     } finally {
       setIsLoading(false);
     }
   }, [page, search]);
 
   useEffect(() => {
-    fetchEmails();
+    const timeout = setTimeout(() => void fetchEmails(), 0);
+    return () => clearTimeout(timeout);
   }, [fetchEmails, refreshTrigger]);
 
   // Auto-refresh every 15 seconds
@@ -121,6 +125,10 @@ export default function ScheduledEmailsTable({ refreshTrigger }: ScheduledTableP
               {Array.from({ length: 5 }).map((_, i) => <SkeletonRow key={i} />)}
             </tbody>
           </table>
+        ) : loadError ? (
+          <div role="alert" style={{ padding: 24, color: 'var(--text-muted)', textAlign: 'center' }}>
+            Could not load scheduled emails. Check your connection and try again.
+          </div>
         ) : emails.length === 0 ? (
           <EmptyState
             title="No Scheduled Emails"

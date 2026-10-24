@@ -21,6 +21,7 @@ async function request<T>(
 
   const res = await fetch(`${API_BASE}${path}`, {
     ...options,
+    credentials: 'include',
     headers,
   });
 

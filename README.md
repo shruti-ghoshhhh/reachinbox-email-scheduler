@@ -190,7 +190,7 @@ Shows:
 ### How It Works
 
 1. **API receives** email schedule request with `recipients[]`, `startAt`, `delayBetweenEmailsMs`
-2. For each recipient, we compute `scheduledAt = startAt + (i * delay)`
+2. For each recipient, the API computes a start time within hourly groups. It spaces the start of each group by at least one hour (and longer if the requested per-email delay would otherwise overlap groups).
 3. A **DB record** is created first with `status=SCHEDULED`
 4. A **BullMQ delayed job** is added with `delay = scheduledAt - now()` and a **unique `jobId`** (idempotency key)
 5. BullMQ stores the job in **Redis** — it will fire at the correct time regardless of server restarts
@@ -208,7 +208,7 @@ Each job has a unique `idempotencyKey = userId_senderId_recipientEmail_subject_s
 
 - BullMQ uses this as `jobId` — duplicate jobs are **silently rejected** by BullMQ
 - The worker also checks if `status === 'SENT'` in DB before processing
-- This guarantees **at-most-once delivery**
+- The DB claim prevents two workers from intentionally processing the same row at once. SMTP and PostgreSQL cannot participate in one atomic transaction, so a crash after the SMTP server accepts a message but before the DB records success can produce a duplicate on recovery.
 
 ---
 
@@ -216,24 +216,22 @@ Each job has a unique `idempotencyKey = userId_senderId_recipientEmail_subject_s
 
 ### Design
 
-We use **Redis-backed sliding window counters** keyed by `rate_limit:sender:{senderId}:{hourWindow}`.
+We use Redis-backed fixed UTC-hour counters keyed by `rate_limit:sender:{senderId}:{hourWindow}`. Each job carries the hourly limit selected in the compose form (or the configured default), and workers enforce that same limit.
 
 ```
 hourWindow = floor(Date.now() / 3600000)  // epoch hour number
 ```
 
-- **INCR + EXPIRE** are used atomically via Redis pipelines
+- A Redis Lua script atomically checks and increments the counter
 - Safe across **multiple workers and instances** — Redis is the single source of truth
 - No in-memory state involved
 
 ### When Limit is Reached
 
-1. Worker decrements the counter (we're not sending)
-2. Job status is updated to `RATE_LIMITED` in DB
-3. Slack notification is sent to the user (if connected)
-4. Job is **rescheduled** to the next hour window with a small buffer (+5s)
-5. Order is preserved as much as possible (new jobId with timestamp suffix)
-6. **No jobs are dropped**
+1. Job status is updated to `RATE_LIMITED` in DB
+2. Slack notification is sent to the user (if connected)
+3. Job is **rescheduled** to the next hour window with a small buffer (+5s)
+4. Order is best effort; jobs are rescheduled with unique BullMQ IDs
 
 ### Configuration
 
@@ -247,7 +245,7 @@ GLOBAL_MAX_EMAILS_PER_HOUR=200       # Global fallback
 ## ⚙️ Worker Concurrency & Delay
 
 - **Concurrency**: `WORKER_CONCURRENCY=5` — 5 emails processed in parallel
-- **Inter-email delay**: `EMAIL_SEND_DELAY_MS=2000` — 2 second minimum delay between sends (via BullMQ `limiter` + `setTimeout`)
+- **Inter-email delay**: `EMAIL_SEND_DELAY_MS=2000` — minimum spacing between sends from the same sender, reserved atomically in Redis across worker concurrency
 - Both are fully configurable via `.env`
 
 ---
@@ -258,7 +256,7 @@ When 1000 emails are scheduled for the same time:
 
 1. All 1000 BullMQ delayed jobs fire simultaneously
 2. Worker processes `WORKER_CONCURRENCY` at a time (e.g., 5)
-3. Each sender hits rate limit after `MAX_EMAILS_PER_HOUR_PER_SENDER` (e.g., 50)
+3. Each sender hits its configured per-job hourly limit (e.g., 50)
 4. Remaining jobs are pushed to the **next hour window automatically**
 5. No emails are dropped — all eventually deliver
 
@@ -328,12 +326,12 @@ reachinbox/
 ## ✅ Features Implemented
 
 ### Backend
-- [x] Email scheduling via BullMQ delayed jobs (no cron)
+- [x] Email scheduling via BullMQ delayed jobs
 - [x] PostgreSQL storage with Prisma ORM
 - [x] Idempotency (no duplicate sends)
 - [x] Redis-backed rate limiting (per-sender, per-hour window)
 - [x] Jobs rescheduled (not dropped) on rate limit
-- [x] Slack OAuth + real `chat.postMessage` notification on rate limit
+- [x] Slack OAuth with random, ten-minute, single-use state bound to the authenticated user session + real `chat.postMessage` notification on rate limit
 - [x] Graceful Slack no-op if not connected
 - [x] Configurable worker concurrency
 - [x] Configurable inter-email delay
@@ -366,9 +364,9 @@ reachinbox/
 
 ### Crash window: SENDING → lost email (mitigated)
 
-When a worker claims a job (moves it to `SENDING`) and is then killed *before* the SMTP call completes, the row stays in `SENDING` forever and the email is never delivered.
+When a worker claims a job (moves it to `SENDING`) and is then killed before it finishes, the row remains in `SENDING` until a worker startup recovery pass reclaims rows older than five minutes.
 
-**Mitigation (implemented):** On worker startup, any row stuck in `SENDING` for more than **60 seconds** is automatically reset to `QUEUED` and re-enqueued. The 60-second window is configurable via `STALE_SENDING_THRESHOLD_MS` in `emailWorker.ts`. The practical risk window is therefore bounded to one restart cycle.
+**Mitigation (implemented):** On worker startup, rows stuck in `SENDING` for more than **five minutes** are conditionally reset to `QUEUED` and re-enqueued with a deterministic recovery job ID. This only runs when a worker starts; it is not a periodic recovery process.
 
 **Residual trade-off:** If the SMTP call *succeeded* but the DB update failed (the reverse case), the email is delivered but the DB still shows `SENDING`. The reclaim will re-send it, producing a duplicate. This is extremely unlikely with Ethereal (local network) but is an inherent at-least-once trade-off.
 
@@ -384,10 +382,10 @@ This means when a job is rate-limited, **there is nothing to decrement** — and
 
 ### Hourly limit and delay from the compose form
 
-Both `hourlyLimit` and `delayBetweenEmailsMs` submitted from the compose form are accepted by the `POST /api/emails/schedule` endpoint and used directly when spreading recipients across hour windows:
+Both `hourlyLimit` and `delayBetweenEmailsMs` submitted from the compose form are validated and carried with each queue job. The API spreads work across hour groups and the worker enforces the same per-job limit plus a sender-wide minimum inter-send spacing:
 
 ```
-scheduledAt = startAt + (hourOffset × 3600000) + (posInHour × delayBetweenEmailsMs)
+scheduledAt = startAt + (hourOffset × max(3600000, hourlyLimit × delayBetweenEmailsMs)) + (posInHour × delayBetweenEmailsMs)
 ```
 
 The env defaults (`MAX_EMAILS_PER_HOUR_PER_SENDER`, `EMAIL_SEND_DELAY_MS`) serve only as fallbacks when the form fields are omitted.
@@ -418,7 +416,7 @@ When a job is rate-limited and rescheduled, the new BullMQ `jobId` includes `Dat
 
 ### Elasticsearch is optional
 
-If Elasticsearch is unavailable, full-text search falls back gracefully. Core scheduling and sending functionality is not affected.
+If Elasticsearch is unavailable, search requests return an error rather than pretending there are no matches. Core scheduling and sending functionality is not affected. Search queries are scoped to the authenticated user's ID in Elasticsearch and rechecked against PostgreSQL before returning records.
 
 ---
 

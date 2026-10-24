@@ -43,7 +43,8 @@ export interface RateLimitResult {
  * ARGV[1] = limit (max count)
  * ARGV[2] = TTL seconds (7200 = 2h so we cover the expiry boundary)
  *
- * Returns { count, wasCreated }
+ * Returns { allowed (1/0), resulting count }. An explicit flag distinguishes
+ * incrementing to the limit from being already at the limit.
  */
 const incrIfBelowLimitScript = `
 local key = KEYS[1]
@@ -58,27 +59,28 @@ else
 end
 
 if current >= limit then
-  return current
+  return {0, current}
 end
 
 local newVal = redis.call('INCR', key)
 if newVal == 1 then
   redis.call('EXPIRE', key, ttl)
 end
-return newVal
+return {1, newVal}
 `;
 
 /**
  * Check and atomically increment the rate limit counter for a sender.
  * Returns whether the email is allowed to be sent.
  */
-export async function checkAndIncrementRateLimit(senderId: string): Promise<RateLimitResult> {
-  const limit = env.MAX_EMAILS_PER_HOUR_PER_SENDER;
+export async function checkAndIncrementRateLimit(senderId: string, limit = env.MAX_EMAILS_PER_HOUR_PER_SENDER): Promise<RateLimitResult> {
   const window = getHourWindow();
   const key = getRateLimitKey(senderId, window);
 
   // Atomic: only increment if count < limit
-  const result = await redis.eval(incrIfBelowLimitScript, 1, key, String(limit), '7200') as number;
+  const [allowedFlag, currentCount] = await redis.eval(
+    incrIfBelowLimitScript, 1, key, String(limit), '7200'
+  ) as [number, number];
 
   // Parse the window string back to compute next window start
   const y = parseInt(window.slice(0, 4));
@@ -88,16 +90,31 @@ export async function checkAndIncrementRateLimit(senderId: string): Promise<Rate
   const windowStart = Date.UTC(y, mo, day, h);
   const nextWindowAt = new Date(windowStart + 3600000);
 
-  // If result > limit, it means we were at limit already (script returned existing count)
-  const allowed = result <= limit;
+  const allowed = allowedFlag === 1;
 
   return {
     allowed,
-    currentCount: result,
+    currentCount,
     limit,
     nextWindowAt,
     senderId,
   };
+}
+
+/** Reserve a sender-wide send slot so concurrent workers honor the minimum spacing. */
+export async function waitForSenderSendSlot(senderId: string, spacingMs: number): Promise<void> {
+  if (spacingMs <= 0) return;
+  const script = `
+    local now = tonumber(ARGV[1])
+    local spacing = tonumber(ARGV[2])
+    local nextAt = tonumber(redis.call('GET', KEYS[1]) or '0')
+    local slotAt = math.max(now, nextAt)
+    local ttl = math.max(spacing * 2, slotAt - now + spacing * 2)
+    redis.call('SET', KEYS[1], slotAt + spacing, 'PX', ttl)
+    return math.max(0, slotAt - now)
+  `;
+  const waitMs = await redis.eval(script, 1, `rate_limit:sender:${senderId}:next_send_at`, String(Date.now()), String(spacingMs)) as number;
+  if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
 }
 
 /**
@@ -169,6 +186,6 @@ export async function shouldSendSlackNotification(senderId: string): Promise<boo
   const window = getHourWindow();
   const key = getSlackNotifiedKey(senderId, window);
   // SET key 1 NX EX 7200 — returns 'OK' if set, null if already existed
-  const result = await redis.set(key, '1', 'NX', 'EX', 7200);
+  const result = await redis.set(key, '1', 'EX', 7200, 'NX');
   return result === 'OK';
 }

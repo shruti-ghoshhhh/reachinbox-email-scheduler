@@ -11,7 +11,7 @@ router.use(authenticateJWT);
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
     const senders = await prisma.sender.findMany({
-      where: { userId: req.user!.userId },
+      where: { userId: req.authUser!.userId },
       orderBy: { createdAt: 'desc' },
     });
 
@@ -45,8 +45,8 @@ router.post('/', async (req: AuthRequest, res: Response) => {
 
   try {
     const sender = await prisma.sender.upsert({
-      where: { email_userId: { email, userId: req.user!.userId } },
-      create: { email, name, userId: req.user!.userId },
+      where: { email_userId: { email, userId: req.authUser!.userId } },
+      create: { email, name, userId: req.authUser!.userId },
       update: { name },
     });
 
@@ -67,7 +67,7 @@ router.post('/', async (req: AuthRequest, res: Response) => {
 router.delete('/:id', async (req: AuthRequest, res: Response) => {
   try {
     await prisma.sender.deleteMany({
-      where: { id: req.params.id, userId: req.user!.userId },
+      where: { id: req.params.id, userId: req.authUser!.userId },
     });
     res.json({ success: true, message: 'Sender deleted' });
   } catch (err) {

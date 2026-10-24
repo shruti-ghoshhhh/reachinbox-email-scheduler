@@ -36,6 +36,7 @@ app.use(session({
   saveUninitialized: false,
   cookie: {
     secure: env.NODE_ENV === 'production',
+    sameSite: env.NODE_ENV === 'production' ? 'none' : 'lax',
     maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
   },
 }));
@@ -45,7 +46,8 @@ const serverAdapter = new ExpressAdapter();
 serverAdapter.setBasePath('/admin/queues');
 
 createBullBoard({
-  queues: [new BullMQAdapter(emailQueue)],
+  // Bull Board's adapter typings lag BullMQ's progress union in the installed versions.
+  queues: [new BullMQAdapter(emailQueue) as never],
   serverAdapter,
 });
 

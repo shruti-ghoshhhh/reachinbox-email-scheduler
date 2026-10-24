@@ -14,6 +14,8 @@ export interface EmailJobData {
   body: string;
   scheduledAt: string; // ISO string
   idempotencyKey: string;
+  hourlyLimit: number;
+  delayBetweenEmailsMs: number;
 }
 
 export const emailQueue = new Queue<EmailJobData>(EMAIL_QUEUE_NAME, {

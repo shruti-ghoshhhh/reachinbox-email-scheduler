@@ -21,8 +21,8 @@ const scheduleSchema = z.object({
   subject: z.string().min(1),
   body: z.string().min(1),
   startAt: z.string().datetime(),
-  delayBetweenEmailsMs: z.number().min(0).default(2000),
-  hourlyLimit: z.number().min(1).optional(),
+  delayBetweenEmailsMs: z.number().int().min(0).max(3600000).default(2000),
+  hourlyLimit: z.number().int().min(1).max(10000).optional(),
   campaignId: z.string().optional(),
 });
 
@@ -49,7 +49,7 @@ router.post('/schedule', async (req: AuthRequest, res: Response) => {
     campaignId,
   } = parseResult.data;
 
-  const userId = req.user!.userId;
+  const userId = req.authUser!.userId;
 
   try {
     // Upsert sender
@@ -69,11 +69,12 @@ router.post('/schedule', async (req: AuthRequest, res: Response) => {
     // subsequent hours to stay within the rate limit.
     // Q: What happens at email 201 if the limit is 200/hour?
     // A: It is placed in the next hour window (hourOffset=1, posInHour=0).
+    const hourStrideMs = Math.max(3600000, effectiveHourlyLimit * delayBetweenEmailsMs);
     const records = recipients.map((recipient, i) => {
       const hourOffset = Math.floor(i / effectiveHourlyLimit);
       const posInHour = i % effectiveHourlyLimit;
       const scheduledAt = new Date(
-        startTime.getTime() + hourOffset * 3600000 + posInHour * delayBetweenEmailsMs
+        startTime.getTime() + hourOffset * hourStrideMs + posInHour * delayBetweenEmailsMs
       );
       const idempotencyKey = `${userId}_${sender.id}_${recipient}_${subject}_${scheduledAt.getTime()}`;
       return { recipient, scheduledAt, idempotencyKey };
@@ -89,7 +90,7 @@ router.post('/schedule', async (req: AuthRequest, res: Response) => {
         subject,
         body,
         scheduledAt,
-        status: 'QUEUED' as const,
+        status: 'SCHEDULED' as const,
         campaignId: campaignRef,
       })),
       skipDuplicates: true,
@@ -133,6 +134,8 @@ router.post('/schedule', async (req: AuthRequest, res: Response) => {
               body,
               scheduledAt: scheduledAt.toISOString(),
               idempotencyKey,
+              hourlyLimit: effectiveHourlyLimit,
+              delayBetweenEmailsMs,
             },
             opts: {
               jobId: idempotencyKey, // BullMQ deduplicates by jobId
@@ -200,15 +203,15 @@ router.get('/scheduled', async (req: AuthRequest, res: Response) => {
 
   try {
     let whereClause: Record<string, unknown> = {
-      userId: req.user!.userId,
+      userId: req.authUser!.userId,
       status: { in: ['SCHEDULED', 'QUEUED', 'RATE_LIMITED', 'SENDING'] },
     };
 
     if (search) {
       // Use Elasticsearch for full-text search
-      const ids = await searchEmailJobs(search, req.user!.userId);
+      const ids = await searchEmailJobs(search, req.authUser!.userId);
       if (ids.length > 0) {
-        whereClause = { id: { in: ids }, status: { in: ['SCHEDULED', 'QUEUED', 'RATE_LIMITED', 'SENDING'] } };
+        whereClause = { id: { in: ids }, userId: req.authUser!.userId, status: { in: ['SCHEDULED', 'QUEUED', 'RATE_LIMITED', 'SENDING'] } };
       } else {
         res.json({ success: true, data: [], total: 0, page, limit, totalPages: 0 });
         return;
@@ -257,14 +260,14 @@ router.get('/sent', async (req: AuthRequest, res: Response) => {
 
   try {
     let whereClause: Record<string, unknown> = {
-      userId: req.user!.userId,
+      userId: req.authUser!.userId,
       status: { in: ['SENT', 'FAILED'] },
     };
 
     if (search) {
-      const ids = await searchEmailJobs(search, req.user!.userId);
+      const ids = await searchEmailJobs(search, req.authUser!.userId);
       if (ids.length > 0) {
-        whereClause = { id: { in: ids }, status: { in: ['SENT', 'FAILED'] } };
+        whereClause = { id: { in: ids }, userId: req.authUser!.userId, status: { in: ['SENT', 'FAILED'] } };
       } else {
         res.json({ success: true, data: [], total: 0, page, limit, totalPages: 0 });
         return;
@@ -313,9 +316,9 @@ router.get('/search', async (req: AuthRequest, res: Response) => {
   }
 
   try {
-    const ids = await searchEmailJobs(q, req.user!.userId);
+    const ids = await searchEmailJobs(q, req.authUser!.userId);
     const jobs = await prisma.emailJob.findMany({
-      where: { id: { in: ids }, userId: req.user!.userId },
+      where: { id: { in: ids }, userId: req.authUser!.userId },
       include: { sender: { select: { email: true, name: true } } },
     });
 
@@ -346,7 +349,7 @@ router.get('/stats', async (req: AuthRequest, res: Response) => {
       getQueueStats(),
       prisma.emailJob.groupBy({
         by: ['status'],
-        where: { userId: req.user!.userId },
+        where: { userId: req.authUser!.userId },
         _count: { status: true },
       }),
     ]);
@@ -373,7 +376,7 @@ router.get('/rate-limit/:senderId', async (req: AuthRequest, res: Response) => {
   try {
     const { senderId } = req.params;
     const sender = await prisma.sender.findFirst({
-      where: { id: senderId, userId: req.user!.userId },
+      where: { id: senderId, userId: req.authUser!.userId },
     });
 
     if (!sender) {
@@ -393,7 +396,7 @@ router.delete('/:id', async (req: AuthRequest, res: Response) => {
   try {
     const { id } = req.params;
     const job = await prisma.emailJob.findFirst({
-      where: { id, userId: req.user!.userId },
+      where: { id, userId: req.authUser!.userId },
     });
 
     if (!job) {
@@ -429,7 +432,7 @@ router.delete('/:id', async (req: AuthRequest, res: Response) => {
 router.get('/:id', async (req: AuthRequest, res: Response) => {
   try {
     const job = await prisma.emailJob.findFirst({
-      where: { id: req.params.id, userId: req.user!.userId },
+      where: { id: req.params.id, userId: req.authUser!.userId },
       include: { sender: { select: { email: true, name: true } } },
     });
 

@@ -23,7 +23,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const refreshUser = useCallback(async () => {
     try {
       const res = await api.get<{ success: boolean; data: User }>('/api/auth/me');
-      if (res.success) setUser(res.data!);
+      if (res.success) {
+        setUser(res.data!);
+        setToken(localStorage.getItem('token'));
+      }
     } catch {
       setUser(null);
       setToken(null);
@@ -44,13 +47,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   useEffect(() => {
-    const stored = localStorage.getItem('token');
-    if (stored) {
-      setToken(stored);
-      refreshUser().finally(() => setIsLoading(false));
-    } else {
-      setIsLoading(false);
-    }
+    Promise.resolve().then(() => {
+      if (!localStorage.getItem('token')) {
+        setIsLoading(false);
+        return;
+      }
+      return refreshUser().finally(() => setIsLoading(false));
+    });
   }, [refreshUser]);
 
   return (

@@ -6,6 +6,7 @@ import {
   checkAndIncrementRateLimit,
   getNextWindowDelay,
   shouldSendSlackNotification,
+  waitForSenderSendSlot,
 } from '../services/rateLimitService';
 import { sendSlackRateLimitNotification } from '../services/slackService';
 import { indexEmailJob, updateEmailJobIndex } from '../config/elasticsearch';
@@ -19,56 +20,47 @@ import { env } from '../config/env';
  * We fix this by resetting rows older than STALE_SENDING_THRESHOLD_MS
  * back to QUEUED and re-enqueuing them.
  */
-const STALE_SENDING_THRESHOLD_MS = 60_000; // 60 seconds
+const STALE_SENDING_THRESHOLD_MS = 5 * 60_000; // allow slow SMTP calls to finish before reclaiming
+const STALE_RECOVERY_RETRY_MS = 30_000;
+const scheduledRecoveryTimers = new Map<string, NodeJS.Timeout>();
 
 async function reclaimStaleSendingJobs(): Promise<void> {
   const cutoff = new Date(Date.now() - STALE_SENDING_THRESHOLD_MS);
 
   // Atomically move all stale SENDING rows → QUEUED
-  const updated = await prisma.$executeRaw`
-    UPDATE email_jobs
-    SET status = 'QUEUED', "updatedAt" = now()
-    WHERE status = 'SENDING'
-      AND "updatedAt" < ${cutoff}
-  `;
+  const staleJobs = await prisma.emailJob.findMany({
+    where: { status: 'SENDING', updatedAt: { lt: cutoff } },
+    include: { sender: { select: { email: true, name: true } } },
+  });
+  let updated = 0;
+  for (const job of staleJobs) {
+    const claim = await prisma.emailJob.updateMany({
+      where: { id: job.id, status: 'SENDING', updatedAt: { lt: cutoff } },
+      data: { status: 'QUEUED' },
+    });
+    if (!claim.count) continue;
+    updated++;
+    try {
+      await emailQueue.add('send-email', {
+      emailJobId: job.id, userId: job.userId, senderId: job.senderId,
+      senderEmail: job.sender.email, senderName: job.sender.name,
+      recipientEmail: job.recipientEmail, subject: job.subject, body: job.body,
+      scheduledAt: job.scheduledAt.toISOString(), idempotencyKey: job.idempotencyKey,
+      hourlyLimit: env.MAX_EMAILS_PER_HOUR_PER_SENDER,
+      delayBetweenEmailsMs: env.EMAIL_SEND_DELAY_MS,
+      }, { jobId: `${job.idempotencyKey}_recovery_${Date.now()}_${updated}`, delay: 0 });
+    } catch (error) {
+      // Restore SENDING so a later recovery scan can safely retry the claim.
+      await prisma.emailJob.updateMany({ where: { id: job.id, status: 'QUEUED' }, data: { status: 'SENDING' } });
+      throw error;
+    }
+  }
 
   if (updated > 0) {
     console.warn(
       `⚠️  Reclaimed ${updated} stale SENDING job(s) — worker likely crashed mid-send. Re-enqueuing.`
     );
 
-    // Fetch and re-enqueue the reclaimed rows
-    const staleJobs = await prisma.emailJob.findMany({
-      where: {
-        status: 'QUEUED',
-        updatedAt: { gte: cutoff },
-      },
-      include: {
-        sender: { select: { email: true, name: true } },
-      },
-    });
-
-    for (const job of staleJobs) {
-      await emailQueue.add(
-        'send-email',
-        {
-          emailJobId: job.id,
-          userId: job.userId,
-          senderId: job.senderId,
-          senderEmail: job.sender.email,
-          senderName: job.sender.name,
-          recipientEmail: job.recipientEmail,
-          subject: job.subject,
-          body: job.body,
-          scheduledAt: job.scheduledAt.toISOString(),
-          idempotencyKey: `${job.idempotencyKey}_reclaim_${Date.now()}`,
-        },
-        {
-          jobId: `${job.idempotencyKey}_reclaim_${Date.now()}`,
-          delay: 0,
-        }
-      );
-    }
   }
 }
 
@@ -91,7 +83,8 @@ const worker = new Worker<EmailJobData>(
       recipientEmail,
       subject,
       body,
-      idempotencyKey,
+      idempotencyKey, hourlyLimit = env.MAX_EMAILS_PER_HOUR_PER_SENDER,
+      delayBetweenEmailsMs = env.EMAIL_SEND_DELAY_MS,
     } = job.data;
 
     console.log(`📨 Processing job ${job.id} → ${recipientEmail}`);
@@ -105,7 +98,7 @@ const worker = new Worker<EmailJobData>(
       UPDATE email_jobs
       SET status = 'SENDING', "updatedAt" = now()
       WHERE id = ${emailJobId}
-        AND status IN ('SCHEDULED', 'QUEUED')
+        AND status IN ('SCHEDULED', 'QUEUED', 'RATE_LIMITED')
     `;
 
     if (updated === 0) {
@@ -125,7 +118,13 @@ const worker = new Worker<EmailJobData>(
     // incrementing — so we must NOT call decrementRateLimit here, because
     // there is nothing to undo and a spurious decrement would let an extra
     // email through the next check.
-    const rateLimitResult = await checkAndIncrementRateLimit(senderId);
+    let rateLimitResult;
+    try {
+      rateLimitResult = await checkAndIncrementRateLimit(senderId, hourlyLimit);
+    } catch (error) {
+      await prisma.emailJob.updateMany({ where: { id: emailJobId, status: 'SENDING' }, data: { status: 'QUEUED' } });
+      throw error;
+    }
 
     if (!rateLimitResult.allowed) {
       // No decrement needed — the script did NOT increment in this case.
@@ -133,42 +132,27 @@ const worker = new Worker<EmailJobData>(
         `⏳ Rate limit hit for sender ${senderEmail}. Rescheduling to next window.`
       );
 
-      // Revert status to RATE_LIMITED so the dashboard shows the right state
-      await prisma.emailJob.update({
-        where: { id: emailJobId },
-        data: { status: 'RATE_LIMITED' },
-      });
+      try {
+        const delay = await getNextWindowDelay(senderId);
+        await emailQueue.add('send-email', job.data, {
+          jobId: `${idempotencyKey}_retry_${Date.now()}`,
+          delay,
+        });
+        await prisma.emailJob.update({ where: { id: emailJobId }, data: { status: 'RATE_LIMITED' } });
+        await updateEmailJobIndex(emailJobId, { status: 'RATE_LIMITED' });
 
-      await updateEmailJobIndex(emailJobId, { status: 'RATE_LIMITED' });
-
-      // Send Slack notification – ONCE per sender per hour window
-      const shouldNotify = await shouldSendSlackNotification(senderId);
-      if (shouldNotify) {
-        await sendSlackRateLimitNotification(
-          userId,
-          senderEmail,
-          rateLimitResult.limit,
-          rateLimitResult.nextWindowAt
-        );
+        const shouldNotify = await shouldSendSlackNotification(senderId);
+        if (shouldNotify) await sendSlackRateLimitNotification(userId, senderEmail, rateLimitResult.limit, rateLimitResult.nextWindowAt);
+      } catch (error) {
+        await prisma.emailJob.updateMany({ where: { id: emailJobId, status: 'SENDING' }, data: { status: 'QUEUED' } });
+        throw error;
       }
-
-      // Reschedule to next hour window – don't fail the job.
-      // The new jobId includes a timestamp to preserve relative order:
-      // jobs rate-limited earlier get a lower timestamp and will be
-      // processed first in the next window.
-      const delay = await getNextWindowDelay(senderId);
-      await emailQueue.add('send-email', job.data, {
-        jobId: `${idempotencyKey}_retry_${Date.now()}`,
-        delay,
-      });
 
       return; // Don't fail the job — it's been rescheduled
     }
 
     // ── 3. Apply inter-email delay (to mimic provider throttling) ──────────
-    if (env.EMAIL_SEND_DELAY_MS > 0) {
-      await new Promise((resolve) => setTimeout(resolve, env.EMAIL_SEND_DELAY_MS));
-    }
+    await waitForSenderSendSlot(senderId, delayBetweenEmailsMs);
 
     // ── 4. Send email via Ethereal SMTP ────────────────────────────────────
     let result: { messageId: string; previewUrl: string } | null = null;
@@ -181,7 +165,7 @@ const worker = new Worker<EmailJobData>(
         html: body,
       });
     } catch (smtpError) {
-      // If SMTP fails, revert to QUEUED so the retry can re-enter the flow
+      // BullMQ retries this same payload; QUEUED permits its atomic claim.
       await prisma.emailJob.update({
         where: { id: emailJobId },
         data: { status: 'QUEUED', errorMessage: (smtpError as Error).message },
@@ -229,17 +213,51 @@ worker.on('completed', (job) => {
   console.log(`✅ Job ${job.id} completed`);
 });
 
+/**
+ * A stalled job can be retried by BullMQ before its DB row is old enough to
+ * reclaim. That retry sees SENDING and exits, so arrange one event-driven
+ * follow-up scan after the existing safety window. This avoids a polling loop
+ * while still recovering rows that become stale after worker startup.
+ */
+worker.on('stalled', (jobId) => {
+  if (scheduledRecoveryTimers.has(jobId)) return;
+
+  const timer = setTimeout(() => {
+    scheduledRecoveryTimers.delete(jobId);
+    reclaimStaleSendingJobs().catch((err) => {
+      console.error(`Failed to recover stalled job ${jobId}:`, err);
+      // Keep recovery event-driven and retry transient Redis/DB failures.
+      scheduleStaleRecovery(jobId, STALE_RECOVERY_RETRY_MS);
+    });
+  }, STALE_SENDING_THRESHOLD_MS);
+  timer.unref();
+  scheduledRecoveryTimers.set(jobId, timer);
+});
+
+function scheduleStaleRecovery(jobId: string, delayMs: number): void {
+  if (scheduledRecoveryTimers.has(jobId)) return;
+  const timer = setTimeout(() => {
+    scheduledRecoveryTimers.delete(jobId);
+    reclaimStaleSendingJobs().catch((err) => {
+      console.error(`Failed to recover stalled job ${jobId}:`, err);
+      scheduleStaleRecovery(jobId, STALE_RECOVERY_RETRY_MS);
+    });
+  }, delayMs);
+  timer.unref();
+  scheduledRecoveryTimers.set(jobId, timer);
+}
+
 worker.on('failed', async (job, err) => {
   console.error(`❌ Job ${job?.id} failed:`, err.message);
 
-  if (job?.data?.emailJobId) {
+  if (job?.data?.emailJobId && job.attemptsMade >= (job.opts.attempts ?? 1)) {
     try {
       // Only mark as FAILED if it hasn't already been handled above
       await prisma.$executeRaw`
         UPDATE email_jobs
         SET status = 'FAILED', "errorMessage" = ${err.message}, "updatedAt" = now()
         WHERE id = ${job.data.emailJobId}
-          AND status = 'SENDING'
+          AND status IN ('SENDING', 'QUEUED')
       `;
       await updateEmailJobIndex(job.data.emailJobId, {
         status: 'FAILED',

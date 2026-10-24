@@ -107,7 +107,7 @@ export async function searchEmailJobs(query: string, userId: string): Promise<st
     return result.hits.hits.map((hit) => hit._id as string);
   } catch (error) {
     console.warn('⚠️  ES search failed:', (error as Error).message);
-    return [];
+    throw new Error('Search service unavailable');
   }
 }
 

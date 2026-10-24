@@ -8,7 +8,7 @@ export interface JwtPayload {
 }
 
 export interface AuthRequest extends Request {
-  user?: JwtPayload;
+  authUser?: JwtPayload;
 }
 
 export function authenticateJWT(
@@ -28,7 +28,7 @@ export function authenticateJWT(
 
   try {
     const payload = jwt.verify(token, env.JWT_SECRET) as JwtPayload;
-    req.user = payload;
+    req.authUser = payload;
     next();
   } catch {
     res.status(401).json({ success: false, message: 'Invalid or expired token' });

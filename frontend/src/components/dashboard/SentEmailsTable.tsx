@@ -27,6 +27,7 @@ interface SentEmailsTableProps {
 export default function SentEmailsTable({ refreshTrigger }: SentEmailsTableProps) {
   const [emails, setEmails] = useState<EmailJob[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState('');
@@ -36,6 +37,7 @@ export default function SentEmailsTable({ refreshTrigger }: SentEmailsTableProps
 
   const fetchEmails = useCallback(async () => {
     setIsLoading(true);
+    setLoadError(false);
     try {
       const params = new URLSearchParams({
         page: String(page),
@@ -51,13 +53,16 @@ export default function SentEmailsTable({ refreshTrigger }: SentEmailsTableProps
       }
     } catch {
       setEmails([]);
+      setTotal(0);
+      setLoadError(true);
     } finally {
       setIsLoading(false);
     }
   }, [page, search]);
 
   useEffect(() => {
-    fetchEmails();
+    const timeout = setTimeout(() => void fetchEmails(), 0);
+    return () => clearTimeout(timeout);
   }, [fetchEmails, refreshTrigger]);
 
   useEffect(() => {
@@ -120,6 +125,10 @@ export default function SentEmailsTable({ refreshTrigger }: SentEmailsTableProps
               {Array.from({ length: 5 }).map((_, i) => <SkeletonRow key={i} />)}
             </tbody>
           </table>
+        ) : loadError ? (
+          <div role="alert" style={{ padding: 24, color: 'var(--text-muted)', textAlign: 'center' }}>
+            Could not load sent emails. Check your connection and try again.
+          </div>
         ) : emails.length === 0 ? (
           <EmptyState
             title="No Sent Emails"

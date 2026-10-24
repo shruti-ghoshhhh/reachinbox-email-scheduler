@@ -48,15 +48,19 @@ function DashboardInner() {
   useEffect(() => {
     if (searchParams.get('slack_connected') === 'true') {
       toast.success('✅ Slack connected successfully!');
-      setSlackConnected(true);
     }
     if (searchParams.get('slack_error') === 'true') {
       toast.error('Failed to connect Slack. Please try again.');
     }
   }, [searchParams]);
 
-  const handleSlackConnect = () => {
-    window.location.href = `${API_BASE}/api/slack/connect`;
+  const handleSlackConnect = async () => {
+    try {
+      const result = await api.get<{ success: boolean; url: string }>('/api/slack/connect');
+      window.location.assign(result.url);
+    } catch {
+      toast.error('Could not start Slack connection. Please try again.');
+    }
   };
 
   const handleComposeSuccess = () => {
