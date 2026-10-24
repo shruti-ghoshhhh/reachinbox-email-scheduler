@@ -8,10 +8,18 @@
  * Preview emails at: https://ethereal.email/messages
  */
 
-import nodemailer from 'nodemailer';
 import fs from 'fs';
 import path from 'path';
 import { env } from '../config/env';
+import type { Transporter } from 'nodemailer';
+
+// Nodemailer's test-account helper caches one account by default. Disable that
+// cache while it loads so the multi-account pool can contain distinct senders.
+const previousEtherealCache = process.env.ETHEREAL_CACHE;
+process.env.ETHEREAL_CACHE = 'no';
+const nodemailer = require('nodemailer') as typeof import('nodemailer');
+if (previousEtherealCache === undefined) delete process.env.ETHEREAL_CACHE;
+else process.env.ETHEREAL_CACHE = previousEtherealCache;
 
 /** Path where we persist Ethereal credentials across restarts */
 const ACCOUNTS_FILE = path.resolve(process.cwd(), '.ethereal-accounts.json');
@@ -20,7 +28,7 @@ interface EtherealAccount {
   email: string;
   user: string;
   pass: string;
-  transporter: nodemailer.Transporter;
+  transporter: Transporter;
 }
 
 // Pool of Ethereal accounts for multi-sender demo
@@ -72,6 +80,8 @@ function buildAccount(user: string, pass: string): EtherealAccount {
  * Call once on server startup.
  */
 export async function initEtherealAccounts(): Promise<void> {
+  if (accountPool.length > 0) return;
+
   // If credentials are set in .env, use a single configured account
   if (env.ETHEREAL_USER && env.ETHEREAL_PASS) {
     const acc = buildAccount(env.ETHEREAL_USER, env.ETHEREAL_PASS);
@@ -84,25 +94,25 @@ export async function initEtherealAccounts(): Promise<void> {
   // Try to restore previously persisted accounts (survives restarts)
   const saved = loadPersistedAccounts();
   if (saved.length > 0) {
-    console.log(`🔄 Restoring ${saved.length} persisted Ethereal account(s)...`);
-    for (const { user, pass } of saved) {
+    const uniqueSaved = [...new Map(saved.map((account) => [account.user, account])).values()];
+    console.log(`🔄 Restoring ${uniqueSaved.length} persisted Ethereal account(s)...`);
+    for (const { user, pass } of uniqueSaved) {
       const acc = buildAccount(user, pass);
       accountPool.push(acc);
       console.log(`✅ Restored Ethereal sender: ${acc.email}`);
     }
-    defaultAccount = accountPool[0];
-    console.log(`📬 Preview emails at: https://ethereal.email/messages`);
-    return;
   }
 
-  // First run — create 3 Ethereal accounts and persist them
-  console.log('🔧 Creating Ethereal test accounts (first run)...');
-  for (let i = 0; i < 3; i++) {
+  // Maintain up to three distinct accounts. Nodemailer's account cache is
+  // disabled above so each call provisions a separate Ethereal identity.
+  console.log('🔧 Creating Ethereal test accounts...');
+  for (let i = accountPool.length; i < 3; i++) {
     try {
       const account = await nodemailer.createTestAccount();
+      if (accountPool.some((existing) => existing.email === account.user)) continue;
       const acc = buildAccount(account.user, account.pass);
       accountPool.push(acc);
-      console.log(`✅ Ethereal sender ${i + 1}: ${acc.email}`);
+      console.log(`✅ Ethereal sender ${accountPool.length}: ${acc.email}`);
     } catch (err) {
       console.warn(`⚠️  Failed to create Ethereal account ${i + 1}:`, (err as Error).message);
     }
@@ -113,7 +123,7 @@ export async function initEtherealAccounts(): Promise<void> {
   }
 
   defaultAccount = accountPool[0];
-  // Persist so we don't re-create on the next restart
+  // Persist only distinct account credentials so sender choices survive restarts.
   saveAccounts(accountPool.map(({ user, pass }) => ({ user, pass })));
   console.log(`📬 Preview emails at: https://ethereal.email/messages`);
   console.log(`📧 Available senders: ${accountPool.map((a) => a.email).join(', ')}`);
@@ -123,7 +133,7 @@ export async function initEtherealAccounts(): Promise<void> {
  * Get the transporter for a specific sender email.
  * Throws when the requested sender is not a configured Ethereal account.
  */
-export function getTransporterForSender(senderEmail: string): nodemailer.Transporter {
+export function getTransporterForSender(senderEmail: string): Transporter {
   const account = accountPool.find((a) => a.email === senderEmail);
   if (account) return account.transporter;
   throw new Error(`No configured Ethereal account found for sender ${senderEmail}`);

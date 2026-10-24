@@ -129,19 +129,6 @@ export async function waitForSenderSendSlot(senderId: string, spacingMs: number)
 }
 
 /**
- * Decrement counter (when a job is rescheduled instead of sent).
- * Only decrement if above 0 to avoid negative counts.
- */
-export async function decrementRateLimit(senderId: string): Promise<void> {
-  const window = getHourWindow();
-  const key = getRateLimitKey(senderId, window);
-  const current = await redis.get(key);
-  if (current && parseInt(current) > 0) {
-    await redis.decr(key);
-  }
-}
-
-/**
  * Get current rate limit status without incrementing.
  */
 export async function getRateLimitStatus(senderId: string): Promise<{
