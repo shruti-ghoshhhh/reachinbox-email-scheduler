@@ -120,7 +120,9 @@ const worker = new Worker<EmailJobData>(
     // email through the next check.
     let rateLimitResult;
     try {
-      rateLimitResult = await checkAndIncrementRateLimit(senderId, hourlyLimit);
+      // Quota is one admission per logical email per UTC hour. BullMQ SMTP
+      // retries reuse this reservation instead of consuming another slot.
+      rateLimitResult = await checkAndIncrementRateLimit(senderId, hourlyLimit, emailJobId);
     } catch (error) {
       await prisma.emailJob.updateMany({ where: { id: emailJobId, status: 'SENDING' }, data: { status: 'QUEUED' } });
       throw error;

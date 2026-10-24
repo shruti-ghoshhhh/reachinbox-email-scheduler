@@ -36,12 +36,14 @@ export interface RateLimitResult {
 }
 
 /**
- * Lua script: atomically INCR the counter and check against limit.
+ * Lua script: atomically reserve one hourly slot per logical email job.
  * Returns the new count. If the key was newly created, sets EXPIRE.
  *
  * KEYS[1] = rate limit key
+ * KEYS[2] = per-job reservation key for this hour
  * ARGV[1] = limit (max count)
  * ARGV[2] = TTL seconds (7200 = 2h so we cover the expiry boundary)
+ * ARGV[3] = reservation id (email job id)
  *
  * Returns { allowed (1/0), resulting count }. An explicit flag distinguishes
  * incrementing to the limit from being already at the limit.
@@ -50,6 +52,13 @@ const incrIfBelowLimitScript = `
 local key = KEYS[1]
 local limit = tonumber(ARGV[1])
 local ttl = tonumber(ARGV[2])
+local reservationKey = KEYS[2]
+
+-- A retry already admitted in this hour reuses its slot.
+if redis.call('EXISTS', reservationKey) == 1 then
+  local current = tonumber(redis.call('GET', key) or '0')
+  return {1, current}
+end
 
 local current = redis.call('GET', key)
 if current == false then
@@ -66,6 +75,7 @@ local newVal = redis.call('INCR', key)
 if newVal == 1 then
   redis.call('EXPIRE', key, ttl)
 end
+redis.call('SET', reservationKey, '1', 'EX', ttl)
 return {1, newVal}
 `;
 
@@ -73,13 +83,14 @@ return {1, newVal}
  * Check and atomically increment the rate limit counter for a sender.
  * Returns whether the email is allowed to be sent.
  */
-export async function checkAndIncrementRateLimit(senderId: string, limit = env.MAX_EMAILS_PER_HOUR_PER_SENDER): Promise<RateLimitResult> {
+export async function checkAndIncrementRateLimit(senderId: string, limit = env.MAX_EMAILS_PER_HOUR_PER_SENDER, reservationId?: string): Promise<RateLimitResult> {
   const window = getHourWindow();
   const key = getRateLimitKey(senderId, window);
+  const reservationKey = `rate_limit:reservation:${senderId}:${window}:${reservationId ?? `${Date.now()}:${Math.random()}`}`;
 
   // Atomic: only increment if count < limit
   const [allowedFlag, currentCount] = await redis.eval(
-    incrIfBelowLimitScript, 1, key, String(limit), '7200'
+    incrIfBelowLimitScript, 2, key, reservationKey, String(limit), '7200', reservationId ?? ''
   ) as [number, number];
 
   // Parse the window string back to compute next window start

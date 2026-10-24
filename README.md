@@ -218,6 +218,8 @@ Each job has a unique `idempotencyKey = userId_senderId_recipientEmail_subject_s
 
 We use Redis-backed fixed UTC-hour counters keyed by `rate_limit:sender:{senderId}:{hourWindow}`. Each job carries the hourly limit selected in the compose form (or the configured default), and workers enforce that same limit.
 
+The hourly quota counts **logical email jobs admitted for SMTP in each UTC hour**, including jobs whose SMTP attempt fails. A BullMQ retry for the same job reuses its Redis reservation and does not consume another slot in that hour; if it retries in a later hour, it reserves a slot in that new window. This bounds concurrent worker retries without allowing one failing message to repeatedly consume the sender's hourly capacity.
+
 ```
 hourWindow = floor(Date.now() / 3600000)  // epoch hour number
 ```
