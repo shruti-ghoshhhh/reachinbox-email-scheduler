@@ -197,18 +197,19 @@ Shows:
 
 ### Server Restart Survival
 
-- BullMQ jobs are stored in **Redis with persistence** (`appendonly yes` in docker-compose)
-- On restart, the worker reconnects to Redis and picks up all pending/delayed jobs automatically
-- **No jobs are lost** — future emails still send at the right time
-- DB records track status independently — the worker checks DB state before processing
+- BullMQ waiting and delayed jobs are stored in Redis (the supplied Docker Compose configuration enables Redis AOF persistence).
+- After a worker restart, BullMQ resumes retained waiting/delayed jobs. The worker also reconciles database rows still marked `SCHEDULED` into the queue.
+- These mechanisms cover queued work and the API-to-Redis enqueue boundary. They do not make SMTP delivery and PostgreSQL status updates atomic; see the delivery guarantee below.
+- A row left in `SENDING` is eligible for recovery after five minutes when a worker starts, or after BullMQ reports the job stalled and the safety window elapses.
 
 ### Idempotency
 
-Each job has a unique `idempotencyKey = userId_senderId_recipientEmail_subject_scheduledAt`.
+Each scheduled row has a deterministic unique key derived from `userId_senderId_recipientEmail_subject_scheduledAt`.
 
-- BullMQ uses this as `jobId` — duplicate jobs are **silently rejected** by BullMQ
-- The worker also checks if `status === 'SENT'` in DB before processing
-- The DB claim prevents two workers from intentionally processing the same row at once. SMTP and PostgreSQL cannot participate in one atomic transaction, so a crash after the SMTP server accepts a message but before the DB records success can produce a duplicate on recovery.
+- PostgreSQL's unique constraint and `createMany(skipDuplicates)` collapse repeated schedule requests that produce the same key into one row.
+- BullMQ uses that key for normal enqueue and reconciliation, which prevents duplicate queue entries while the corresponding BullMQ job remains retained.
+- The worker atomically claims a row by changing it to `SENDING`, preventing two workers from processing that row concurrently.
+- These checks prevent duplicate scheduling and concurrent claims; they do **not** guarantee exactly-once email delivery. SMTP and PostgreSQL cannot participate in one atomic transaction, so recovery after an SMTP-accepted/database-write-failed event can send a duplicate.
 
 ---
 
@@ -260,7 +261,7 @@ When 1000 emails are scheduled for the same time:
 2. Worker processes `WORKER_CONCURRENCY` at a time (e.g., 5)
 3. Each sender hits its configured per-job hourly limit (e.g., 50)
 4. Remaining jobs are pushed to the **next hour window automatically**
-5. No emails are dropped — all eventually deliver
+5. Jobs are intended to remain represented in PostgreSQL or Redis and be retried/reconciled after recoverable queue failures. This load scenario has not been verified at 1,000 jobs, and eventual delivery is not guaranteed if dependencies remain unavailable or SMTP permanently fails.
 
 ---
 
@@ -330,7 +331,7 @@ reachinbox/
 ### Backend
 - [x] Email scheduling via BullMQ delayed jobs
 - [x] PostgreSQL storage with Prisma ORM
-- [x] Idempotency (no duplicate sends)
+- [x] Duplicate schedule suppression and atomic worker claims (does not provide exactly-once SMTP delivery)
 - [x] Redis-backed rate limiting (per-sender, per-hour window)
 - [x] Jobs rescheduled (not dropped) on rate limit
 - [x] Slack OAuth with random, ten-minute, single-use state bound to the authenticated user session + real `chat.postMessage` notification on rate limit
@@ -364,13 +365,18 @@ reachinbox/
 
 ## 🔧 Trade-offs & Known Behaviors
 
-### Crash window: SENDING → lost email (mitigated)
+### Delivery guarantee and crash windows
 
-When a worker claims a job (moves it to `SENDING`) and is then killed before it finishes, the row remains in `SENDING` until a worker startup recovery pass reclaims rows older than five minutes.
+The system provides **durable scheduling with retry/reconciliation**, not exactly-once delivery. PostgreSQL, Redis, and an SMTP server do not share a transaction, and SMTP delivery does not provide a provider idempotency key in this implementation.
 
-**Mitigation (implemented):** On worker startup, rows stuck in `SENDING` for more than **five minutes** are conditionally reset to `QUEUED` and re-enqueued with a deterministic recovery job ID. This only runs when a worker starts; it is not a periodic recovery process.
+- If a worker crashes after claiming a row but before SMTP accepts it, the row may remain `SENDING`. Once it is older than five minutes, a worker startup scan (or the delayed scan triggered by a BullMQ `stalled` event) conditionally moves it to `QUEUED` and enqueues recovery work.
+- If SMTP accepts the message but PostgreSQL fails to record `SENT`, the database still shows `SENDING`. A normal BullMQ retry sees that state and skips the send. A later stale-row recovery can enqueue it again, but cannot tell whether SMTP accepted the earlier attempt, so the recipient may receive a duplicate.
+- Recovery is conditional and safe against concurrent scanners, but it cannot resolve this delivery ambiguity. A row may remain `SENDING` until the relevant recovery scan runs; this is not a zero-downtime, periodic database sweep.
+- If SMTP permanently rejects a message or dependencies stay unavailable, eventual delivery is not guaranteed. Failed jobs and database state should be inspected and repaired by an operator.
 
-**Residual trade-off:** If the SMTP call *succeeded* but the DB update failed (the reverse case), the email is delivered but the DB still shows `SENDING`. The reclaim will re-send it, producing a duplicate. This is extremely unlikely with Ethereal (local network) but is an inherent at-least-once trade-off.
+Deterministic tests cover stale-row recovery, concurrent scans, enqueue failure retry, and the SMTP-accepted/database-write-failed boundary. The SMTP/PostgreSQL boundary test is a controlled simulation with injected collaborators; it does not claim that real external services can fail atomically or exactly reproduce every crash timing.
+
+Run the backend checks with `cd backend && npm run test:delivery-guarantees && npm run test:queue-recovery && npm run test:rate-limit`. These tests use isolated in-memory collaborators; they do not modify the local Docker database or send email.
 
 ---
 
@@ -430,5 +436,5 @@ Emails are fake — they are captured by Ethereal's servers. Preview URLs are st
 
 ### Worker separation
 
-The worker (`npm run worker`) is a separate process for production-grade isolation. It can be scaled horizontally — multiple workers share the same Redis queue and the atomic `SENDING` claim prevents duplicate sends.
+The worker (`npm run worker`) is a separate process for production-grade isolation. It can be scaled horizontally — multiple workers share the same Redis queue and the atomic `SENDING` claim prevents concurrent processing of one database row. SMTP/database crash-window duplicates remain possible as described above.
 

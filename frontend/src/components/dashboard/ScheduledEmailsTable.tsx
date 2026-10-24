@@ -2,7 +2,8 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { format } from 'date-fns';
-import { Search, RefreshCw, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Search, RefreshCw, ChevronLeft, ChevronRight, X } from 'lucide-react';
+import toast from 'react-hot-toast';
 import { api } from '@/lib/api';
 import { EmailJob, PaginatedResponse } from '@/types';
 import StatusBadge from '@/components/ui/StatusBadge';
@@ -32,6 +33,7 @@ export default function ScheduledEmailsTable({ refreshTrigger }: ScheduledTableP
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState('');
   const [searchInput, setSearchInput] = useState('');
+  const [cancellingIds, setCancellingIds] = useState<Set<string>>(new Set());
   const LIMIT = 10;
   const totalPages = Math.ceil(total / LIMIT);
 
@@ -77,6 +79,24 @@ export default function ScheduledEmailsTable({ refreshTrigger }: ScheduledTableP
     setPage(1);
   };
 
+  const handleCancel = async (id: string) => {
+    setCancellingIds((current) => new Set(current).add(id));
+    try {
+      const result = await api.delete<{ success: boolean; message?: string }>(`/api/emails/${id}`);
+      toast.success(result.message ?? 'Email cancelled');
+      await fetchEmails();
+    } catch (error) {
+      toast.error((error as Error).message || 'Could not cancel email');
+      await fetchEmails();
+    } finally {
+      setCancellingIds((current) => {
+        const next = new Set(current);
+        next.delete(id);
+        return next;
+      });
+    }
+  };
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       {/* Toolbar */}
@@ -119,6 +139,7 @@ export default function ScheduledEmailsTable({ refreshTrigger }: ScheduledTableP
                 <th>Sender</th>
                 <th>Scheduled At</th>
                 <th>Status</th>
+                <th>Action</th>
               </tr>
             </thead>
             <tbody>
@@ -144,6 +165,7 @@ export default function ScheduledEmailsTable({ refreshTrigger }: ScheduledTableP
                 <th>Sender</th>
                 <th>Scheduled At</th>
                 <th>Status</th>
+                <th>Action</th>
               </tr>
             </thead>
             <tbody>
@@ -163,6 +185,23 @@ export default function ScheduledEmailsTable({ refreshTrigger }: ScheduledTableP
                   </td>
                   <td>
                     <StatusBadge status={email.status} />
+                  </td>
+                  <td>
+                    {['SCHEDULED', 'QUEUED', 'RATE_LIMITED'].includes(email.status) ? (
+                      <button
+                        type="button"
+                        onClick={() => void handleCancel(email.id)}
+                        disabled={cancellingIds.has(email.id)}
+                        className="btn-secondary"
+                        aria-label={`Cancel email to ${email.recipientEmail}`}
+                        style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '6px 9px', fontSize: 12 }}
+                      >
+                        <X size={13} />
+                        {cancellingIds.has(email.id) ? 'Cancelling…' : 'Cancel'}
+                      </button>
+                    ) : email.status === 'SENDING' ? (
+                      <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>Already sending</span>
+                    ) : null}
                   </td>
                 </tr>
               ))}

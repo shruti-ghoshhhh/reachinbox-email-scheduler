@@ -376,25 +376,51 @@ router.delete('/:id', async (req: AuthRequest, res: Response) => {
       return;
     }
 
-    if (job.status === 'SENT') {
-      res.status(400).json({ success: false, message: 'Cannot cancel already sent email' });
+    if (job.status === 'SENDING') {
+      res.status(409).json({ success: false, code: 'EMAIL_ALREADY_SENDING', message: 'Email is already being sent and can no longer be cancelled' });
       return;
     }
 
-    // Remove from BullMQ queue
-    if (job.bullJobId) {
-      const bullJob = await emailQueue.getJob(job.bullJobId);
-      if (bullJob) {
-        await bullJob.remove();
-      }
+    if (job.status === 'SENT') {
+      res.status(409).json({ success: false, code: 'EMAIL_ALREADY_SENT', message: 'Email has already been sent' });
+      return;
     }
 
-    await prisma.emailJob.update({
-      where: { id },
+    if (job.status === 'CANCELLED') {
+      res.status(409).json({ success: false, code: 'EMAIL_ALREADY_CANCELLED', message: 'Email is already cancelled' });
+      return;
+    }
+
+    if (job.status === 'FAILED') {
+      res.status(409).json({ success: false, code: 'EMAIL_TERMINAL', message: 'Failed email cannot be cancelled' });
+      return;
+    }
+
+    // Claim cancellation atomically. The worker uses the same row status as
+    // its send claim, so exactly one side wins if cancellation races sending.
+    const cancelled = await prisma.emailJob.updateMany({
+      where: { id, userId: req.authUser!.userId, status: { in: ['SCHEDULED', 'QUEUED', 'RATE_LIMITED'] } },
       data: { status: 'CANCELLED' },
     });
+    if (cancelled.count === 0) {
+      const current = await prisma.emailJob.findFirst({ where: { id, userId: req.authUser!.userId } });
+      const alreadySending = current?.status === 'SENDING';
+      res.status(409).json({
+        success: false,
+        code: alreadySending ? 'EMAIL_ALREADY_SENDING' : 'EMAIL_NOT_CANCELLABLE',
+        message: alreadySending ? 'Email is already being sent and can no longer be cancelled' : `Email cannot be cancelled in status ${current?.status ?? 'UNKNOWN'}`,
+      });
+      return;
+    }
 
-    res.json({ success: true, message: 'Email cancelled' });
+    // The row is now CANCELLED, so a worker that races queue removal cannot
+    // claim it for sending. A delayed/active BullMQ job may reject remove().
+    if (job.bullJobId) {
+      const bullJob = await emailQueue.getJob(job.bullJobId);
+      if (bullJob) await bullJob.remove().catch(() => undefined);
+    }
+
+    res.json({ success: true, data: { status: 'CANCELLED' }, message: 'Email cancelled' });
   } catch (err) {
     res.status(500).json({ success: false, message: 'Failed to cancel email' });
   }

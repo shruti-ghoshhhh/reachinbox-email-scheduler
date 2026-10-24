@@ -13,6 +13,8 @@ import { indexEmailJob, updateEmailJobIndex } from '../config/elasticsearch';
 import { emailQueue, EMAIL_QUEUE_NAME, type EmailJobData } from '../queues/emailQueue';
 import { env } from '../config/env';
 import { reconcileScheduledEmailJobs } from '../services/emailQueueReconciliation';
+import { reclaimStaleSendingJobs, STALE_SENDING_THRESHOLD_MS } from '../services/staleSendingRecovery';
+import { deliverAndPersist } from '../services/deliverAndPersist';
 
 /**
  * Reclaim any emails stuck in SENDING from a previous worker crash.
@@ -21,47 +23,16 @@ import { reconcileScheduledEmailJobs } from '../services/emailQueueReconciliatio
  * We fix this by resetting rows older than STALE_SENDING_THRESHOLD_MS
  * back to QUEUED and re-enqueuing them.
  */
-const STALE_SENDING_THRESHOLD_MS = 5 * 60_000; // allow slow SMTP calls to finish before reclaiming
 const STALE_RECOVERY_RETRY_MS = 30_000;
 const scheduledRecoveryTimers = new Map<string, NodeJS.Timeout>();
 
-async function reclaimStaleSendingJobs(): Promise<void> {
-  const cutoff = new Date(Date.now() - STALE_SENDING_THRESHOLD_MS);
-
-  // Atomically move all stale SENDING rows → QUEUED
-  const staleJobs = await prisma.emailJob.findMany({
-    where: { status: 'SENDING', updatedAt: { lt: cutoff } },
-    include: { sender: { select: { email: true, name: true } } },
+async function runStaleSendingRecovery(): Promise<void> {
+  const updated = await reclaimStaleSendingJobs(prisma, emailQueue, {
+    hourlyLimit: env.MAX_EMAILS_PER_HOUR_PER_SENDER,
+    delayBetweenEmailsMs: env.EMAIL_SEND_DELAY_MS,
   });
-  let updated = 0;
-  for (const job of staleJobs) {
-    const claim = await prisma.emailJob.updateMany({
-      where: { id: job.id, status: 'SENDING', updatedAt: { lt: cutoff } },
-      data: { status: 'QUEUED' },
-    });
-    if (!claim.count) continue;
-    updated++;
-    try {
-      await emailQueue.add('send-email', {
-      emailJobId: job.id, userId: job.userId, senderId: job.senderId,
-      senderEmail: job.sender.email, senderName: job.sender.name,
-      recipientEmail: job.recipientEmail, subject: job.subject, body: job.body,
-      scheduledAt: job.scheduledAt.toISOString(), idempotencyKey: job.idempotencyKey,
-      hourlyLimit: env.MAX_EMAILS_PER_HOUR_PER_SENDER,
-      delayBetweenEmailsMs: env.EMAIL_SEND_DELAY_MS,
-      }, { jobId: `${job.idempotencyKey}_recovery_${Date.now()}_${updated}`, delay: 0 });
-    } catch (error) {
-      // Restore SENDING so a later recovery scan can safely retry the claim.
-      await prisma.emailJob.updateMany({ where: { id: job.id, status: 'QUEUED' }, data: { status: 'SENDING' } });
-      throw error;
-    }
-  }
-
   if (updated > 0) {
-    console.warn(
-      `⚠️  Reclaimed ${updated} stale SENDING job(s) — worker likely crashed mid-send. Re-enqueuing.`
-    );
-
+    console.warn(`⚠️  Reclaimed ${updated} stale SENDING job(s) — re-enqueuing.`);
   }
 }
 
@@ -88,7 +59,7 @@ const reconciliationTimer = setInterval(() => void runQueueReconciliation(), 30_
 reconciliationTimer.unref();
 
 // Run stale-SENDING recovery on startup
-reclaimStaleSendingJobs().catch((err) =>
+runStaleSendingRecovery().catch((err) =>
   console.error('Failed to reclaim stale SENDING jobs:', err)
 );
 
@@ -180,38 +151,34 @@ const worker = new Worker<EmailJobData>(
     await waitForSenderSendSlot(senderId, delayBetweenEmailsMs);
 
     // ── 4. Send email via Ethereal SMTP ────────────────────────────────────
-    let result: { messageId: string; previewUrl: string } | null = null;
-    try {
-      result = await sendEmail({
+    const sentAt = new Date();
+    const result = await deliverAndPersist(
+      () => sendEmail({
         from: senderEmail,
         fromName: senderName,
         to: recipientEmail,
         subject,
         html: body,
-      });
-    } catch (smtpError) {
-      // BullMQ retries this same payload; QUEUED permits its atomic claim.
-      await prisma.emailJob.update({
-        where: { id: emailJobId },
-        data: { status: 'QUEUED', errorMessage: (smtpError as Error).message },
-      });
-      throw smtpError; // Let BullMQ handle retry with backoff
-    }
-
-    // ── 5. Mark as SENT in DB ──────────────────────────────────────────────
-    // Known trade-off: crash window between SMTP success and DB update.
-    // On retry, the atomic status check above skips (status=SENDING),
-    // so we do a direct update here for crash recovery.
-    const sentAt = new Date();
-    await prisma.emailJob.update({
-      where: { id: emailJobId },
-      data: {
-        status: 'SENT',
-        sentAt,
-        previewUrl: result.previewUrl,
-        errorMessage: null,
+      }),
+      async (delivery) => {
+        await prisma.emailJob.update({
+          where: { id: emailJobId },
+          data: {
+            status: 'SENT',
+            sentAt,
+            previewUrl: delivery.previewUrl,
+            errorMessage: null,
+          },
+        });
       },
-    });
+      async (smtpError) => {
+        // BullMQ retries this same payload; QUEUED permits its atomic claim.
+        await prisma.emailJob.update({
+          where: { id: emailJobId },
+          data: { status: 'QUEUED', errorMessage: (smtpError as Error).message },
+        });
+      }
+    );
 
     // ── 6. Update Elasticsearch index ─────────────────────────────────────
     await updateEmailJobIndex(emailJobId, {
@@ -249,7 +216,7 @@ worker.on('stalled', (jobId) => {
 
   const timer = setTimeout(() => {
     scheduledRecoveryTimers.delete(jobId);
-    reclaimStaleSendingJobs().catch((err) => {
+    runStaleSendingRecovery().catch((err) => {
       console.error(`Failed to recover stalled job ${jobId}:`, err);
       // Keep recovery event-driven and retry transient Redis/DB failures.
       scheduleStaleRecovery(jobId, STALE_RECOVERY_RETRY_MS);
@@ -263,7 +230,7 @@ function scheduleStaleRecovery(jobId: string, delayMs: number): void {
   if (scheduledRecoveryTimers.has(jobId)) return;
   const timer = setTimeout(() => {
     scheduledRecoveryTimers.delete(jobId);
-    reclaimStaleSendingJobs().catch((err) => {
+    runStaleSendingRecovery().catch((err) => {
       console.error(`Failed to recover stalled job ${jobId}:`, err);
       scheduleStaleRecovery(jobId, STALE_RECOVERY_RETRY_MS);
     });
