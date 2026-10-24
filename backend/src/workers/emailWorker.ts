@@ -12,6 +12,7 @@ import { sendSlackRateLimitNotification } from '../services/slackService';
 import { indexEmailJob, updateEmailJobIndex } from '../config/elasticsearch';
 import { emailQueue, EMAIL_QUEUE_NAME, type EmailJobData } from '../queues/emailQueue';
 import { env } from '../config/env';
+import { reconcileScheduledEmailJobs } from '../services/emailQueueReconciliation';
 
 /**
  * Reclaim any emails stuck in SENDING from a previous worker crash.
@@ -63,6 +64,28 @@ async function reclaimStaleSendingJobs(): Promise<void> {
 
   }
 }
+
+// Recover DB rows that were committed before a queue write failed or the API
+// process stopped. Stable BullMQ job IDs make concurrent scans idempotent.
+let reconciliationRunning = false;
+async function runQueueReconciliation(): Promise<void> {
+  if (reconciliationRunning) return;
+  reconciliationRunning = true;
+  try {
+    const result = await reconcileScheduledEmailJobs();
+    if (result.enqueued || result.failed) {
+      console.log(`Queue reconciliation: enqueued=${result.enqueued}, failed=${result.failed}`);
+    }
+  } catch (err) {
+    console.error('Failed to reconcile scheduled email jobs:', err);
+  } finally {
+    reconciliationRunning = false;
+  }
+}
+
+void runQueueReconciliation();
+const reconciliationTimer = setInterval(() => void runQueueReconciliation(), 30_000);
+reconciliationTimer.unref();
 
 // Run stale-SENDING recovery on startup
 reclaimStaleSendingJobs().catch((err) =>

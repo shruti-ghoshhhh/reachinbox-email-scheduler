@@ -2,6 +2,7 @@ import { Router, Response } from 'express';
 import { prisma } from '../config/database';
 import { authenticateJWT, type AuthRequest } from '../middleware/auth';
 import { emailQueue, getQueueStats } from '../queues/emailQueue';
+import { reconcileScheduledEmailJobs } from '../services/emailQueueReconciliation';
 import { indexEmailJobsBulk, searchEmailJobs } from '../config/elasticsearch';
 import { getRateLimitStatus } from '../services/rateLimitService';
 import { getEtherealSenderAccounts } from '../services/etherealService';
@@ -102,6 +103,8 @@ router.post('/schedule', async (req: AuthRequest, res: Response) => {
         scheduledAt,
         status: 'SCHEDULED' as const,
         campaignId: campaignRef,
+        hourlyLimit: effectiveHourlyLimit,
+        delayBetweenEmailsMs,
       })),
       skipDuplicates: true,
     });
@@ -121,52 +124,11 @@ router.post('/schedule', async (req: AuthRequest, res: Response) => {
       },
     });
 
-    // Build lookup map
-    const jobMap = new Map(createdJobs.map((j) => [j.idempotencyKey, j]));
-
-    // ── Bulk enqueue via addBulk (much faster than a loop for 1000+ emails) ─
-    const bullJobs = await emailQueue.addBulk(
-      records
-        .filter((r) => jobMap.has(r.idempotencyKey))
-        .map(({ recipient, scheduledAt, idempotencyKey }) => {
-          const dbJob = jobMap.get(idempotencyKey)!;
-          const delay = Math.max(0, scheduledAt.getTime() - Date.now());
-          return {
-            name: 'send-email',
-            data: {
-              emailJobId: dbJob.id,
-              userId,
-              senderId: sender.id,
-              senderEmail,
-              senderName,
-              recipientEmail: recipient,
-              subject,
-              body,
-              scheduledAt: scheduledAt.toISOString(),
-              idempotencyKey,
-              hourlyLimit: effectiveHourlyLimit,
-              delayBetweenEmailsMs,
-            },
-            opts: {
-              jobId: idempotencyKey, // BullMQ deduplicates by jobId
-              delay,
-            },
-          };
-        })
-    );
-
-    // ── Update bullJobId references (batch transaction) ───────────────────
-    const bullJobUpdates = bullJobs
-      .filter((bj) => bj.id && bj.data?.idempotencyKey)
-      .map((bj) =>
-        prisma.emailJob.update({
-          where: { idempotencyKey: bj.data.idempotencyKey },
-          data: { bullJobId: bj.id },
-        })
-      );
-
-    if (bullJobUpdates.length > 0) {
-      await prisma.$transaction(bullJobUpdates);
+    // SCHEDULED rows are the durable recovery source if this enqueue or the
+    // subsequent BullMQ reference write fails. Stable job IDs make retries safe.
+    const enqueueResult = await reconcileScheduledEmailJobs();
+    if (enqueueResult.failed > 0) {
+      throw new Error(`Failed to enqueue ${enqueueResult.failed} scheduled email job(s)`);
     }
 
     // ── Bulk index in Elasticsearch ────────────────────────────────────────

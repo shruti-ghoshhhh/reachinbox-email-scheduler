@@ -60,6 +60,8 @@ model EmailJob {
   previewUrl      String?     // Ethereal email preview URL
   campaignId      String?     // group related emails
   retryCount      Int         @default(0)
+  hourlyLimit     Int         @default(50)
+  delayBetweenEmailsMs Int    @default(2000)
   createdAt       DateTime    @default(now())
   updatedAt       DateTime    @updatedAt
 
