@@ -1,0 +1,85 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            String   @id @default(uuid())
+  googleId      String   @unique
+  email         String   @unique
+  name          String
+  avatar        String?
+  slackToken    String?
+  slackTeamId   String?
+  slackUserId   String?
+  slackConnected Boolean @default(false)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  senders       Sender[]
+  emailJobs     EmailJob[]
+
+  @@map("users")
+}
+
+model Sender {
+  id        String   @id @default(uuid())
+  email     String
+  name      String
+  userId    String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  emailJobs EmailJob[]
+
+  @@unique([email, userId])
+  @@map("senders")
+}
+
+model EmailJob {
+  id              String      @id @default(uuid())
+  idempotencyKey  String      @unique // prevents duplicates
+  userId          String
+  senderId        String
+  recipientEmail  String
+  subject         String
+  body            String      @db.Text
+  scheduledAt     DateTime
+  sentAt          DateTime?
+  status          EmailStatus @default(SCHEDULED)
+  bullJobId       String?     // BullMQ job ID for reference
+  errorMessage    String?
+  previewUrl      String?     // Ethereal email preview URL
+  campaignId      String?     // group related emails
+  retryCount      Int         @default(0)
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  user    User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sender  Sender @relation(fields: [senderId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([senderId])
+  @@index([status])
+  @@index([scheduledAt])
+  @@index([campaignId])
+  @@map("email_jobs")
+}
+
+enum EmailStatus {
+  SCHEDULED
+  QUEUED
+  SENDING
+  SENT
+  FAILED
+  RATE_LIMITED
+  CANCELLED
+}
