@@ -121,17 +121,12 @@ export async function initEtherealAccounts(): Promise<void> {
 
 /**
  * Get the transporter for a specific sender email.
- * Falls back to the default account if not found.
+ * Throws when the requested sender is not a configured Ethereal account.
  */
 export function getTransporterForSender(senderEmail: string): nodemailer.Transporter {
   const account = accountPool.find((a) => a.email === senderEmail);
   if (account) return account.transporter;
-
-  // Fallback: use default account but still send from the requested address
-  if (!defaultAccount) {
-    throw new Error('No Ethereal accounts initialized. Call initEtherealAccounts() first.');
-  }
-  return defaultAccount.transporter;
+  throw new Error(`No configured Ethereal account found for sender ${senderEmail}`);
 }
 
 /**
@@ -142,6 +137,10 @@ export function getEtherealAccounts(): Array<{ email: string; previewUrl: string
     email: a.email,
     previewUrl: `https://ethereal.email/messages`,
   }));
+}
+
+export function getEtherealSenderAccounts(): Array<{ email: string }> {
+  return accountPool.map(({ email }) => ({ email }));
 }
 
 export interface SendEmailResult {
@@ -160,10 +159,13 @@ export async function sendEmail(params: {
     await initEtherealAccounts();
   }
 
-  const transporter = getTransporterForSender(params.from);
+  const account = accountPool.find((a) => a.email === params.from);
+  if (!account) {
+    throw new Error(`No configured Ethereal account found for sender ${params.from}`);
+  }
 
-  const info = await transporter.sendMail({
-    from: `"${params.fromName}" <${defaultAccount!.user}>`, // Ethereal requires auth user as from
+  const info = await account.transporter.sendMail({
+    from: `"${params.fromName}" <${account.user}>`, // Ethereal requires the authenticated address as From
     to: params.to,
     subject: params.subject,
     html: params.html,

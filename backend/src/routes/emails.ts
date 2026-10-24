@@ -4,6 +4,7 @@ import { authenticateJWT, type AuthRequest } from '../middleware/auth';
 import { emailQueue, getQueueStats } from '../queues/emailQueue';
 import { indexEmailJobsBulk, searchEmailJobs } from '../config/elasticsearch';
 import { getRateLimitStatus } from '../services/rateLimitService';
+import { getEtherealSenderAccounts } from '../services/etherealService';
 import { env } from '../config/env';
 import { v4 as uuidv4 } from 'uuid';
 import { z } from 'zod';
@@ -48,6 +49,15 @@ router.post('/schedule', async (req: AuthRequest, res: Response) => {
     hourlyLimit,
     campaignId,
   } = parseResult.data;
+
+  const configuredSenders = getEtherealSenderAccounts();
+  if (!configuredSenders.some((account) => account.email === senderEmail)) {
+    res.status(400).json({
+      success: false,
+      message: 'Selected sender account is not configured for delivery',
+    });
+    return;
+  }
 
   const userId = req.authUser!.userId;
 

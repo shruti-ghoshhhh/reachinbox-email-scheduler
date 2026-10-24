@@ -2,10 +2,16 @@ import { Router, Response } from 'express';
 import { prisma } from '../config/database';
 import { authenticateJWT, type AuthRequest } from '../middleware/auth';
 import { getRateLimitStatus } from '../services/rateLimitService';
+import { getEtherealSenderAccounts } from '../services/etherealService';
 
 const router = Router();
 
 router.use(authenticateJWT);
+
+// GET /api/senders/accounts – available SMTP sender accounts for compose
+router.get('/accounts', (_req: AuthRequest, res: Response) => {
+  res.json({ success: true, data: getEtherealSenderAccounts() });
+});
 
 // GET /api/senders – list all senders for the user
 router.get('/', async (req: AuthRequest, res: Response) => {

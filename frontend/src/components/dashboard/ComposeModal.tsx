@@ -1,9 +1,9 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { X, Mail, Clock, Zap, Hash, Send, AlertCircle } from 'lucide-react';
 import { api } from '@/lib/api';
-import { ApiResponse, ScheduleEmailPayload } from '@/types';
+import { ApiResponse, ScheduleEmailPayload, SenderAccount } from '@/types';
 import CsvUploader from '@/components/ui/CsvUploader';
 import LoadingSpinner from '@/components/ui/LoadingSpinner';
 import toast from 'react-hot-toast';
@@ -25,19 +25,45 @@ export default function ComposeModal({ isOpen, onClose, onSuccess }: ComposeModa
     hourlyLimit: 50,
   });
   const [recipients, setRecipients] = useState<string[]>([]);
+  const [senderAccounts, setSenderAccounts] = useState<SenderAccount[]>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  useEffect(() => {
+    if (!isOpen) return;
+    let cancelled = false;
+    api.get<ApiResponse<SenderAccount[]>>('/api/senders/accounts')
+      .then((res) => {
+        if (cancelled) return;
+        const accounts = res.data ?? [];
+        setSenderAccounts(accounts);
+        setForm((prev) => {
+          if (prev.senderEmail && accounts.some((account) => account.email === prev.senderEmail)) return prev;
+          return { ...prev, senderEmail: accounts[0]?.email ?? '', senderName: accounts[0]?.email ?? '' };
+        });
+      })
+      .catch((err) => {
+        if (!cancelled) setError((err as Error).message || 'Could not load sender accounts.');
+      });
+    return () => { cancelled = true; };
+  }, [isOpen]);
+
   const handleChange = (
-    e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>
+    e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>
   ) => {
     const { name, value } = e.target;
-    setForm((prev) => ({
-      ...prev,
-      [name]: name === 'delayBetweenEmailsMs' || name === 'hourlyLimit'
-        ? parseInt(value, 10) || 0
-        : value,
-    }));
+    setForm((prev) => {
+      if (name === 'senderEmail') {
+        const account = senderAccounts.find((item) => item.email === value);
+        return { ...prev, senderEmail: value, senderName: account?.email ?? '' };
+      }
+      return {
+        ...prev,
+        [name]: name === 'delayBetweenEmailsMs' || name === 'hourlyLimit'
+          ? parseInt(value, 10) || 0
+          : value,
+      };
+    });
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -187,33 +213,25 @@ export default function ComposeModal({ isOpen, onClose, onSuccess }: ComposeModa
               <p style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 10 }}>
                 Sender Information
               </p>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 12 }}>
                 <div>
                   <label style={{ fontSize: 13, color: 'var(--text-secondary)', display: 'block', marginBottom: 6 }}>
-                    Sender Name *
+                    Sending Account *
                   </label>
-                  <input
-                    name="senderName"
-                    value={form.senderName}
-                    onChange={handleChange}
-                    className="input-field"
-                    placeholder="John Doe"
-                    required
-                  />
-                </div>
-                <div>
-                  <label style={{ fontSize: 13, color: 'var(--text-secondary)', display: 'block', marginBottom: 6 }}>
-                    Sender Email *
-                  </label>
-                  <input
+                  <select
                     name="senderEmail"
-                    type="email"
                     value={form.senderEmail}
                     onChange={handleChange}
                     className="input-field"
-                    placeholder="john@company.com"
+                    disabled={senderAccounts.length === 0}
                     required
-                  />
+                  >
+                    <option value="" disabled>{senderAccounts.length === 0 ? 'Loading sender accounts…' : 'Select a sender account'}</option>
+                    {senderAccounts.map((account) => <option key={account.email} value={account.email}>{account.email}</option>)}
+                  </select>
+                  <p style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 6 }}>
+                    The selected account will send the campaign.
+                  </p>
                 </div>
               </div>
             </div>

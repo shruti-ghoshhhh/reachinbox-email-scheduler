@@ -56,6 +56,10 @@ export interface Sender {
   };
 }
 
+export interface SenderAccount {
+  email: string;
+}
+
 export interface User {
   id: string;
   email: string;
