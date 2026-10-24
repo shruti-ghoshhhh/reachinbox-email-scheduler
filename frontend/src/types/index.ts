@@ -20,6 +20,7 @@ export type EmailStatus =
   | 'SCHEDULED'
   | 'QUEUED'
   | 'SENDING'
+  | 'DELIVERY_UNKNOWN'
   | 'SENT'
   | 'FAILED'
   | 'RATE_LIMITED'
@@ -39,6 +40,11 @@ export interface EmailJob {
   status: EmailStatus;
   previewUrl: string | null;
   campaignId: string | null;
+  errorMessage: string | null;
+  deliveryAttemptStartedAt: string | null;
+  deliveryMessageId: string | null;
+  retryCount: number;
+  updatedAt: string;
   createdAt: string;
 }
 
@@ -52,6 +58,7 @@ export interface Sender {
     currentCount: number;
     limit: number;
     remaining: number;
+    policy: string;
     nextWindowAt: string;
   };
 }
@@ -76,7 +83,7 @@ export interface QueueStats {
     completed: number;
     failed: number;
   };
-  emails: Record<EmailStatus, number>;
+  emails: Partial<Record<EmailStatus, number>>;
 }
 
 export interface ScheduleEmailPayload {

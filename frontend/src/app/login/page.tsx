@@ -4,25 +4,29 @@ import { useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { Zap, Mail, Shield, ArrowRight, Clock } from 'lucide-react';
 import { API_BASE } from '@/lib/api';
+import ThemeToggle from '@/components/ui/ThemeToggle';
+import { useAuth } from '@/contexts/AuthContext';
+import { FullPageLoader } from '@/components/ui/LoadingSpinner';
 
 const GOOGLE_AUTH_URL = `${API_BASE}/api/auth/google`;
 
 function FeatureChip({ icon, text }: { icon: React.ReactNode; text: string }) {
   return (
     <div
+      className="login-feature-chip"
       style={{
         display: 'inline-flex',
         alignItems: 'center',
         gap: 7,
-        background: 'rgba(99, 102, 241, 0.08)',
-        border: '1px solid rgba(99, 102, 241, 0.15)',
+        background: 'var(--canvas-soft)',
+        border: '1px solid var(--hairline-soft)',
         borderRadius: 9999,
         padding: '6px 14px',
         fontSize: 13,
         color: 'var(--text-secondary)',
       }}
     >
-      <span style={{ color: 'var(--accent)' }}>{icon}</span>
+      <span style={{ color: 'var(--ink)' }}>{icon}</span>
       {text}
     </div>
   );
@@ -30,11 +34,13 @@ function FeatureChip({ icon, text }: { icon: React.ReactNode; text: string }) {
 
 export default function LoginPage() {
   const router = useRouter();
+  const { user, isLoading } = useAuth();
 
   useEffect(() => {
-    const token = localStorage.getItem('token');
-    if (token) router.push('/dashboard');
-  }, [router]);
+    if (!isLoading && user) router.replace('/dashboard');
+  }, [isLoading, user, router]);
+
+  if (isLoading || user) return <FullPageLoader />;
 
   return (
     <div
@@ -49,6 +55,7 @@ export default function LoginPage() {
         overflow: 'hidden',
       }}
     >
+      <ThemeToggle className="login-theme-toggle" />
       {/* Background glow */}
       <div
         style={{
@@ -58,7 +65,7 @@ export default function LoginPage() {
           transform: 'translateX(-50%)',
           width: 600,
           height: 600,
-          background: 'radial-gradient(circle, rgba(99, 102, 241, 0.12) 0%, transparent 70%)',
+          background: 'none',
           pointerEvents: 'none',
         }}
       />
@@ -83,15 +90,14 @@ export default function LoginPage() {
               width: 72,
               height: 72,
               borderRadius: 20,
-              background: 'linear-gradient(135deg, #6366f1, #8b5cf6)',
+              background: 'var(--ink)',
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
-              boxShadow: '0 16px 40px rgba(99, 102, 241, 0.4)',
-              animation: 'pulse-ring 2s infinite',
+              boxShadow: 'none',
             }}
           >
-            <Zap size={32} color="white" />
+            <Zap size={32} color="var(--on-ink)" />
           </div>
           <div style={{ textAlign: 'center' }}>
             <h1 style={{ fontSize: 32, fontWeight: 800, letterSpacing: '-0.02em', color: 'var(--text-primary)', lineHeight: 1.1 }}>
@@ -134,6 +140,7 @@ export default function LoginPage() {
 
           <a
             href={GOOGLE_AUTH_URL}
+            className="google-login"
             style={{
               display: 'flex',
               alignItems: 'center',

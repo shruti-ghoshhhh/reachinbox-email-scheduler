@@ -9,7 +9,7 @@ function persistedJob(overrides = {}) {
     userId: 'user-1',
     senderId: 'sender-1',
     recipientEmail: 'recipient@example.test',
-    subject: 'Hello',
+    subject: 'Follow up: proposal',
     body: 'Body',
     scheduledAt: new Date(Date.now() + 60_000),
     hourlyLimit: 7,
@@ -54,8 +54,9 @@ test('retries a persisted row after queue outage and records it exactly once', a
   assert.equal(afterRestart.failed.length, 0);
   assert.equal(status, 'QUEUED');
   assert.equal(queue.jobs.size, 1);
-  assert.equal(queue.jobs.get(row.idempotencyKey).data.hourlyLimit, 7);
-  assert.equal(queue.jobs.get(row.idempotencyKey).data.delayBetweenEmailsMs, 321);
+  assert.equal(queue.jobs.get(`email-${row.id}`).data.subject, 'Follow up: proposal');
+  assert.equal(queue.jobs.get(`email-${row.id}`).data.hourlyLimit, 7);
+  assert.equal(queue.jobs.get(`email-${row.id}`).data.delayBetweenEmailsMs, 321);
 });
 
 test('deduplicates when Redis accepted enqueue but database acknowledgement failed', async () => {
@@ -75,4 +76,12 @@ test('deduplicates when Redis accepted enqueue but database acknowledgement fail
   assert.equal(afterRestart.failed.length, 0);
   assert.equal(queue.jobs.size, 1);
   assert.equal(markCalls, 2);
+});
+
+test('reconciliation preserves a persisted rate-limit BullMQ reference', async () => {
+  const row = persistedJob({ bullJobId: 'email-db-job-1-window-1792929605000' });
+  const queue = idempotentQueue();
+  await enqueuePersistedEmailJobs([row], queue, async () => {});
+  assert.equal(queue.jobs.size, 1);
+  assert.ok(queue.jobs.has(row.bullJobId));
 });

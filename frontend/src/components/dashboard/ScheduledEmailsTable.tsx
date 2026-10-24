@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { format } from 'date-fns';
 import { Search, RefreshCw, ChevronLeft, ChevronRight, X } from 'lucide-react';
 import toast from 'react-hot-toast';
@@ -28,6 +28,11 @@ function SkeletonRow() {
 export default function ScheduledEmailsTable({ refreshTrigger }: ScheduledTableProps) {
   const [emails, setEmails] = useState<EmailJob[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const hasLoaded = useRef(false);
+  const latestRequest = useRef(0);
+  const blockingRequest = useRef(false);
+  const refreshRequest = useRef(false);
   const [loadError, setLoadError] = useState(false);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -37,9 +42,18 @@ export default function ScheduledEmailsTable({ refreshTrigger }: ScheduledTableP
   const LIMIT = 10;
   const totalPages = Math.ceil(total / LIMIT);
 
-  const fetchEmails = useCallback(async () => {
-    setIsLoading(true);
-    setLoadError(false);
+  const fetchEmails = useCallback(async (showLoading = true) => {
+    const blocking = showLoading || !hasLoaded.current;
+    if (!blocking && (blockingRequest.current || refreshRequest.current)) return;
+    const requestId = ++latestRequest.current;
+    if (blocking) {
+      blockingRequest.current = true;
+      setIsLoading(true);
+      setLoadError(false);
+    } else {
+      refreshRequest.current = true;
+      setIsRefreshing(true);
+    }
     try {
       const params = new URLSearchParams({
         page: String(page),
@@ -49,16 +63,26 @@ export default function ScheduledEmailsTable({ refreshTrigger }: ScheduledTableP
       const res = await api.get<PaginatedResponse<EmailJob>>(
         `/api/emails/scheduled?${params}`
       );
-      if (res.success) {
+      if (requestId === latestRequest.current && res.success) {
         setEmails(res.data);
         setTotal(res.total);
       }
     } catch {
-      setEmails([]);
-      setTotal(0);
-      setLoadError(true);
+      if (requestId === latestRequest.current && blocking) {
+        setEmails([]);
+        setTotal(0);
+        setLoadError(true);
+      }
     } finally {
-      setIsLoading(false);
+      if (requestId === latestRequest.current) {
+        hasLoaded.current = true;
+        blockingRequest.current = false;
+        refreshRequest.current = false;
+        if (blocking) setIsLoading(false);
+        setIsRefreshing(false);
+      } else if (!blocking) {
+        refreshRequest.current = false;
+      }
     }
   }, [page, search]);
 
@@ -69,7 +93,7 @@ export default function ScheduledEmailsTable({ refreshTrigger }: ScheduledTableP
 
   // Auto-refresh every 15 seconds
   useEffect(() => {
-    const interval = setInterval(fetchEmails, 15000);
+    const interval = setInterval(() => void fetchEmails(false), 15000);
     return () => clearInterval(interval);
   }, [fetchEmails]);
 
@@ -109,6 +133,7 @@ export default function ScheduledEmailsTable({ refreshTrigger }: ScheduledTableP
               onChange={(e) => setSearchInput(e.target.value)}
               className="input-field"
               placeholder="Search by subject, email..."
+              aria-label="Search scheduled emails by subject or email"
               style={{ paddingLeft: 34, fontSize: 13 }}
             />
           </div>
@@ -116,20 +141,13 @@ export default function ScheduledEmailsTable({ refreshTrigger }: ScheduledTableP
             Search
           </button>
         </form>
-        <button onClick={fetchEmails} className="btn-secondary" style={{ padding: '8px 12px' }}>
-          <RefreshCw size={14} />
+        <button onClick={() => void fetchEmails(false)} className="btn-secondary" style={{ padding: '8px 12px' }} aria-label="Refresh scheduled emails" title="Refresh scheduled emails">
+          <RefreshCw size={14} className={isRefreshing ? 'animate-spin-slow' : undefined} />
         </button>
       </div>
 
       {/* Table */}
-      <div
-        style={{
-          background: 'var(--bg-card)',
-          border: '1px solid var(--border)',
-          borderRadius: 12,
-          overflow: 'hidden',
-        }}
-      >
+      <div className="table-frame">
         {isLoading ? (
           <table className="data-table">
             <thead>

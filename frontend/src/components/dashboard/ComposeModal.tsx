@@ -7,6 +7,7 @@ import { ApiResponse, ScheduleEmailPayload, SenderAccount } from '@/types';
 import CsvUploader from '@/components/ui/CsvUploader';
 import LoadingSpinner from '@/components/ui/LoadingSpinner';
 import toast from 'react-hot-toast';
+import * as Dialog from '@radix-ui/react-dialog';
 
 interface ComposeModalProps {
   isOpen: boolean;
@@ -120,47 +121,37 @@ export default function ComposeModal({ isOpen, onClose, onSuccess }: ComposeModa
     setError(null);
   };
 
-  if (!isOpen) return null;
-
   return (
-    <div
-      style={{
-        position: 'fixed',
-        inset: 0,
-        zIndex: 1000,
-        background: 'rgba(0,0,0,0.6)',
-        backdropFilter: 'blur(4px)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        padding: 16,
-      }}
-      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
-    >
-      <div
-        className="animate-fade-in"
+    <Dialog.Root open={isOpen} onOpenChange={(open) => { if (!open) onClose(); }}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="compose-overlay" />
+        <Dialog.Content
+        className="modal-panel"
         style={{
-          background: 'var(--bg-card)',
-          border: '1px solid var(--border)',
-          borderRadius: 16,
+          position: 'fixed',
+          zIndex: 1001,
+          top: '50%',
+          left: '50%',
+          transform: 'translate(-50%, -50%)',
           width: '100%',
           maxWidth: 640,
-          maxHeight: '90vh',
+          maxHeight: 'min(90vh, 900px)',
           overflow: 'hidden',
           display: 'flex',
           flexDirection: 'column',
-          boxShadow: '0 25px 50px rgba(0,0,0,0.5)',
+          outline: 'none',
         }}
       >
         {/* Header */}
         <div
+          className="modal-header"
           style={{
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'space-between',
             padding: '20px 24px',
             borderBottom: '1px solid var(--border)',
-            background: 'rgba(99, 102, 241, 0.05)',
+            background: 'var(--canvas-soft)',
           }}
         >
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -169,25 +160,30 @@ export default function ComposeModal({ isOpen, onClose, onSuccess }: ComposeModa
                 width: 36,
                 height: 36,
                 borderRadius: 9,
-                background: 'rgba(99, 102, 241, 0.15)',
+                background: 'var(--canvas-soft)',
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
               }}
             >
-              <Mail size={18} color="#6366f1" />
+              <Mail size={18} color="currentColor" />
             </div>
             <div>
-              <h2 style={{ fontSize: 16, fontWeight: 700, color: 'var(--text-primary)' }}>
+              <Dialog.Title asChild>
+                <h2 style={{ fontSize: 16, fontWeight: 700, color: 'var(--text-primary)' }}>
                 Compose New Campaign
-              </h2>
-              <p style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-                Schedule bulk email campaign
-              </p>
+                </h2>
+              </Dialog.Title>
+              <Dialog.Description asChild>
+                <p style={{ fontSize: 12, color: 'var(--text-muted)' }}>Schedule bulk email campaign</p>
+              </Dialog.Description>
             </div>
           </div>
-          <button
-            onClick={onClose}
+          <Dialog.Close asChild>
+            <button
+              type="button"
+              className="modal-close"
+              aria-label="Close compose dialog"
             style={{
               background: 'var(--bg-secondary)',
               border: '1px solid var(--border)',
@@ -200,9 +196,10 @@ export default function ComposeModal({ isOpen, onClose, onSuccess }: ComposeModa
               cursor: 'pointer',
               color: 'var(--text-muted)',
             }}
-          >
-            <X size={15} />
-          </button>
+            >
+              <X size={17} />
+            </button>
+          </Dialog.Close>
         </div>
 
         {/* Form */}
@@ -210,7 +207,7 @@ export default function ComposeModal({ isOpen, onClose, onSuccess }: ComposeModa
           <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
             {/* Sender Info */}
             <div>
-              <p style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 10 }}>
+              <p className="modal-eyebrow" style={{ marginBottom: 10 }}>
                 Sender Information
               </p>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 12 }}>
@@ -238,7 +235,7 @@ export default function ComposeModal({ isOpen, onClose, onSuccess }: ComposeModa
 
             {/* Email Content */}
             <div>
-              <p style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 10 }}>
+              <p className="modal-eyebrow" style={{ marginBottom: 10 }}>
                 Email Content
               </p>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -286,10 +283,10 @@ export default function ComposeModal({ isOpen, onClose, onSuccess }: ComposeModa
 
             {/* Scheduling */}
             <div>
-              <p style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 10 }}>
+              <p className="modal-eyebrow" style={{ marginBottom: 10 }}>
                 Scheduling Options
               </p>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12 }}>
+              <div className="schedule-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
                 <div style={{ gridColumn: '1 / -1' }}>
                   <label style={{ fontSize: 13, color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
                     <Clock size={13} /> Start Time *
@@ -301,7 +298,7 @@ export default function ComposeModal({ isOpen, onClose, onSuccess }: ComposeModa
                     onChange={handleChange}
                     className="input-field"
                     required
-                    style={{ colorScheme: 'dark' }}
+            style={{ colorScheme: 'light' }}
                   />
                 </div>
                 <div>
@@ -310,6 +307,7 @@ export default function ComposeModal({ isOpen, onClose, onSuccess }: ComposeModa
                   </label>
                   <input
                     name="delayBetweenEmailsMs"
+                    aria-describedby="send-delay-help"
                     type="number"
                     value={form.delayBetweenEmailsMs}
                     onChange={handleChange}
@@ -317,6 +315,9 @@ export default function ComposeModal({ isOpen, onClose, onSuccess }: ComposeModa
                     min={0}
                     step={500}
                   />
+                  <small id="send-delay-help" style={{ display: 'block', marginTop: 6, color: 'var(--text-tertiary)', fontSize: 11 }}>
+                    Sends use the greater of this delay and the server’s provider minimum. Zero does not disable throttling.
+                  </small>
                 </div>
                 <div>
                   <label style={{ fontSize: 13, color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
@@ -330,6 +331,9 @@ export default function ComposeModal({ isOpen, onClose, onSuccess }: ComposeModa
                     className="input-field"
                     min={1}
                   />
+                  <small style={{ display: 'block', marginTop: 6, color: 'var(--text-tertiary)', fontSize: 11 }}>
+                    Campaign cap; the shared sender limit still applies across all campaigns.
+                  </small>
                 </div>
               </div>
             </div>
@@ -340,21 +344,21 @@ export default function ComposeModal({ isOpen, onClose, onSuccess }: ComposeModa
                   display: 'flex',
                   alignItems: 'center',
                   gap: 8,
-                  background: 'rgba(239, 68, 68, 0.1)',
-                  border: '1px solid rgba(239, 68, 68, 0.2)',
-                  borderRadius: 8,
+                  background: 'var(--error-bg)',
+                  border: '1px solid var(--error-bg)',
+                  borderRadius: 12,
                   padding: '10px 14px',
                 }}
               >
-                <AlertCircle size={15} color="#f87171" />
-                <p style={{ fontSize: 13, color: '#f87171' }}>{error}</p>
+                <AlertCircle size={15} color="var(--error)" />
+                <p style={{ fontSize: 13, color: 'var(--error)', margin: 0 }}>{error}</p>
               </div>
             )}
 
             <div style={{ display: 'flex', gap: 12, paddingTop: 4 }}>
-              <button type="button" onClick={onClose} className="btn-secondary" style={{ flex: 1 }}>
-                Cancel
-              </button>
+              <Dialog.Close asChild>
+                <button type="button" className="btn-secondary" style={{ flex: 1 }}>Cancel</button>
+              </Dialog.Close>
               <button
                 type="submit"
                 className="btn-primary"
@@ -370,7 +374,8 @@ export default function ComposeModal({ isOpen, onClose, onSuccess }: ComposeModa
             </div>
           </form>
         </div>
-      </div>
-    </div>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
   );
 }

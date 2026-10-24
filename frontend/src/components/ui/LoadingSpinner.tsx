@@ -13,8 +13,8 @@ export default function LoadingSpinner({ size = 20, className = '' }: LoadingSpi
         width: size,
         height: size,
         borderRadius: '50%',
-        border: `2px solid rgba(99, 102, 241, 0.2)`,
-        borderTopColor: '#6366f1',
+        border: '2px solid var(--hairline)',
+        borderTopColor: 'var(--accent)',
         animation: 'spin 0.8s linear infinite',
       }}
     />
@@ -24,6 +24,9 @@ export default function LoadingSpinner({ size = 20, className = '' }: LoadingSpi
 export function FullPageLoader() {
   return (
     <div
+      className="full-page-loader"
+      role="status"
+      aria-busy="true"
       style={{
         display: 'flex',
         alignItems: 'center',
@@ -39,12 +42,12 @@ export function FullPageLoader() {
           width: 48,
           height: 48,
           borderRadius: '50%',
-          border: '3px solid rgba(99, 102, 241, 0.2)',
-          borderTopColor: '#6366f1',
+          border: '3px solid var(--hairline)',
+          borderTopColor: 'var(--accent)',
           animation: 'spin 0.8s linear infinite',
         }}
       />
-      <p style={{ color: 'var(--text-secondary)', fontSize: 14 }}>Loading...</p>
+      <span className="visually-hidden">Loading</span>
     </div>
   );
 }

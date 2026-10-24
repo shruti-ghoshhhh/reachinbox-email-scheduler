@@ -4,7 +4,7 @@ import { enqueuePersistedEmailJobs } from './emailQueueRecovery';
 
 const RECONCILIATION_BATCH_SIZE = 500;
 
-/** Re-enqueue rows left SCHEDULED after an API/Redis/database boundary failure. */
+/** Replay durable queue intent, including recovered QUEUED rows after a crash. */
 export async function reconcileScheduledEmailJobs(): Promise<{ enqueued: number; failed: number }> {
   let enqueued = 0;
   let failed = 0;
@@ -13,7 +13,7 @@ export async function reconcileScheduledEmailJobs(): Promise<{ enqueued: number;
   // Paginate because a prolonged Redis outage can leave a large backlog.
   while (true) {
     const jobs = await prisma.emailJob.findMany({
-      where: { status: 'SCHEDULED' },
+      where: { status: { in: ['SCHEDULED', 'RATE_LIMITED', 'QUEUED'] } },
       include: { sender: { select: { email: true, name: true } } },
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
       ...(cursor ? { cursor, skip: 1 } : {}),
@@ -25,12 +25,13 @@ export async function reconcileScheduledEmailJobs(): Promise<{ enqueued: number;
       jobs,
       emailQueue,
       async (job, bullJobId) => {
-        // Store the BullMQ reference even if the worker already claimed the
-        // job; only transition SCHEDULED rows so a fast worker cannot be
-        // overwritten back to QUEUED.
-        await prisma.emailJob.update({ where: { id: job.id }, data: { bullJobId } });
+        // A stale scan must not overwrite a newer recovery/window generation.
         await prisma.emailJob.updateMany({
-          where: { id: job.id, status: 'SCHEDULED' },
+          where: { id: job.id, bullJobId: job.bullJobId ?? null },
+          data: { bullJobId },
+        });
+        await prisma.emailJob.updateMany({
+          where: { id: job.id, status: 'SCHEDULED', bullJobId },
           data: { status: 'QUEUED' },
         });
       }

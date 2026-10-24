@@ -25,6 +25,7 @@ model User {
 
   senders       Sender[]
   emailJobs     EmailJob[]
+  slackRateLimitNotifications SlackRateLimitNotification[]
 
   @@map("users")
 }
@@ -39,6 +40,7 @@ model Sender {
 
   user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
   emailJobs EmailJob[]
+  slackRateLimitNotifications SlackRateLimitNotification[]
 
   @@unique([email, userId])
   @@map("senders")
@@ -56,6 +58,10 @@ model EmailJob {
   sentAt          DateTime?
   status          EmailStatus @default(SCHEDULED)
   bullJobId       String?     // BullMQ job ID for reference
+  claimToken      String?
+  claimLeaseExpiresAt DateTime?
+  deliveryAttemptStartedAt DateTime?
+  deliveryMessageId String?
   errorMessage    String?
   previewUrl      String?     // Ethereal email preview URL
   campaignId      String?     // group related emails
@@ -76,10 +82,35 @@ model EmailJob {
   @@map("email_jobs")
 }
 
+model SlackRateLimitNotification {
+  id             String   @id @default(uuid())
+  userId         String
+  senderId       String
+  senderEmail    String
+  windowStart    DateTime
+  hourlyLimit    Int
+  nextWindowAt   DateTime
+  status         String   @default("PENDING")
+  attempts       Int      @default(0)
+  leaseExpiresAt DateTime?
+  lastError      String?  @db.Text
+  sentAt         DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sender         Sender   @relation(fields: [senderId], references: [id], onDelete: Cascade)
+
+  @@unique([senderId, windowStart])
+  @@index([status, leaseExpiresAt])
+  @@map("slack_rate_limit_notifications")
+}
+
 enum EmailStatus {
   SCHEDULED
   QUEUED
   SENDING
+  DELIVERY_UNKNOWN
   SENT
   FAILED
   RATE_LIMITED

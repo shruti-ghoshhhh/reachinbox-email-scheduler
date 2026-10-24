@@ -7,19 +7,25 @@ import { BullMQAdapter } from '@bull-board/api/bullMQAdapter';
 import { ExpressAdapter } from '@bull-board/express';
 
 import { env } from './config/env';
+import { RedisSessionStore } from './config/redisSessionStore';
 import { connectDatabase } from './config/database';
 import { connectRedis } from './config/redis';
 import { connectElasticsearch } from './config/elasticsearch';
 import { emailQueue } from './queues/emailQueue';
 import { initEtherealAccounts } from './services/etherealService';
+import { reconcileEmailSearchIndex } from './services/emailSearchIndexReconciliation';
 
 import authRoutes from './routes/auth';
 import emailRoutes from './routes/emails';
 import slackRoutes from './routes/slack';
 import senderRoutes from './routes/senders';
+import { requireAdmin } from './middleware/adminAuth';
 
 
 const app = express();
+
+// Enable this only when the app is behind a trusted TLS-terminating proxy.
+app.set('trust proxy', env.TRUST_PROXY);
 
 // ── Middleware ────────────────────────────────────────────────────────────
 app.use(cors({
@@ -32,6 +38,7 @@ app.use(express.urlencoded({ extended: true }));
 
 app.use(session({
   secret: env.SESSION_SECRET,
+  store: new RedisSessionStore(),
   resave: false,
   saveUninitialized: false,
   cookie: {
@@ -51,7 +58,7 @@ createBullBoard({
   serverAdapter,
 });
 
-app.use('/admin/queues', serverAdapter.getRouter());
+app.use('/admin/queues', requireAdmin, serverAdapter.getRouter());
 console.log(`📊 BullMQ Dashboard available at http://localhost:${env.PORT}/admin/queues`);
 
 // ── API Routes ────────────────────────────────────────────────────────────
@@ -92,12 +99,35 @@ async function bootstrap() {
       console.log(`🚀 Server running at http://localhost:${env.PORT}`);
       console.log(`📊 BullMQ Board: http://localhost:${env.PORT}/admin/queues`);
       console.log(`🌍 Environment: ${env.NODE_ENV}`);
+      void runEmailSearchIndexReconciliation();
     });
   } catch (err) {
     console.error('❌ Failed to start server:', err);
     process.exit(1);
   }
 }
+
+let searchIndexReconciliationRunning = false;
+async function runEmailSearchIndexReconciliation(): Promise<void> {
+  if (searchIndexReconciliationRunning) return;
+  searchIndexReconciliationRunning = true;
+  try {
+    const count = await reconcileEmailSearchIndex();
+    if (count > 0) console.log(`Elasticsearch backfill indexed ${count} email row(s)`);
+  } catch (error) {
+    console.warn('Elasticsearch backfill failed; PostgreSQL rows will be retried:', (error as Error).message);
+  } finally {
+    searchIndexReconciliationRunning = false;
+  }
+}
+
+// PostgreSQL is authoritative: repeat a bounded-batch scan so rows missed
+// during an Elasticsearch outage are eventually indexed after it recovers.
+const emailSearchIndexReconciliationTimer = setInterval(
+  () => void runEmailSearchIndexReconciliation(),
+  60_000,
+);
+emailSearchIndexReconciliationTimer.unref();
 
 // Graceful shutdown
 process.on('SIGTERM', async () => {

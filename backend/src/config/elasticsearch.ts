@@ -1,5 +1,6 @@
 import { Client } from '@elastic/elasticsearch';
 import { env } from './env';
+import { collectAllSearchIds } from '../services/searchPagination';
 
 export const esClient = new Client({
   node: env.ELASTICSEARCH_URL,
@@ -79,6 +80,9 @@ export async function updateEmailJobIndex(id: string, updates: Record<string, un
       index: EMAIL_INDEX,
       id,
       doc: updates,
+      // A worker may update status while the original schedule-time index
+      // write was lost. The recurring DB backfill fills in the full document.
+      doc_as_upsert: true,
     });
   } catch (error) {
     console.warn('⚠️  ES update failed:', (error as Error).message);
@@ -87,24 +91,31 @@ export async function updateEmailJobIndex(id: string, updates: Record<string, un
 
 export async function searchEmailJobs(query: string, userId: string): Promise<string[]> {
   try {
-    const result = await esClient.search({
-      index: EMAIL_INDEX,
-      query: {
-        bool: {
-          must: [
-            {
-              multi_match: {
-                query,
-                fields: ['subject^2', 'body', 'recipientEmail', 'senderEmail'],
+    return await collectAllSearchIds(async (after) => {
+      const result = await esClient.search({
+        index: EMAIL_INDEX,
+        query: {
+          bool: {
+            must: [
+              {
+                multi_match: {
+                  query,
+                  fields: ['subject^2', 'body', 'recipientEmail', 'senderEmail'],
+                },
               },
-            },
-          ],
-          filter: [{ term: { userId } }],
+            ],
+            filter: [{ term: { userId } }],
+          },
         },
-      },
-      size: 100,
+        size: 500,
+        sort: [{ id: 'asc' }],
+        ...(after ? { search_after: after } : {}),
+      });
+      return {
+        ids: result.hits.hits.map((hit) => hit._id as string),
+        after: result.hits.hits[result.hits.hits.length - 1]?.sort as (string | number)[] | undefined,
+      };
     });
-    return result.hits.hits.map((hit) => hit._id as string);
   } catch (error) {
     console.warn('⚠️  ES search failed:', (error as Error).message);
     throw new Error('Search service unavailable');
@@ -127,7 +138,7 @@ export async function indexEmailJobsBulk(docs: Array<{
   status: string;
   campaignId?: string | null;
   createdAt: Date;
-}>): Promise<void> {
+}>, options: { throwOnError?: boolean } = {}): Promise<void> {
   if (docs.length === 0) return;
 
   try {
@@ -144,10 +155,11 @@ export async function indexEmailJobsBulk(docs: Array<{
     const result = await esClient.bulk({ operations, refresh: false });
     if (result.errors) {
       const errored = result.items.filter((i) => i.index?.error);
-      console.warn(`⚠️  ES bulk index had ${errored.length} errors`);
+      throw new Error(`ES bulk index had ${errored.length} document errors`);
     }
   } catch (error) {
     console.warn('⚠️  ES bulk indexing failed:', (error as Error).message);
+    if (options.throwOnError) throw error;
   }
 }
 

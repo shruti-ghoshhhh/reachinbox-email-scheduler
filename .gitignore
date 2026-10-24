@@ -49,3 +49,8 @@ backend/prisma/migrations/dev.db-journal
 .idea/
 *.swp
 *.swo
+
+# Local review notes (not part of the assignment submission)
+/AUDIT.md
+/AUDIT-RECHECK.md
+/SUBMISSION.md

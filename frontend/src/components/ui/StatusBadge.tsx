@@ -10,6 +10,7 @@ const STATUS_LABELS: Record<EmailStatus, string> = {
   SCHEDULED: 'Scheduled',
   QUEUED: 'Queued',
   SENDING: 'Sending',
+  DELIVERY_UNKNOWN: 'Delivery unknown',
   SENT: 'Sent',
   FAILED: 'Failed',
   RATE_LIMITED: 'Rate Limited',
@@ -17,13 +18,14 @@ const STATUS_LABELS: Record<EmailStatus, string> = {
 };
 
 const STATUS_DOTS: Record<EmailStatus, string> = {
-  SCHEDULED: '#60a5fa',
-  QUEUED: '#818cf8',
-  SENDING: '#fbbf24',
-  SENT: '#4ade80',
-  FAILED: '#f87171',
-  RATE_LIMITED: '#fb923c',
-  CANCELLED: '#94a3b8',
+  SCHEDULED: 'var(--muted)',
+  QUEUED: 'var(--table-muted)',
+  SENDING: 'var(--warning)',
+  DELIVERY_UNKNOWN: 'var(--warning)',
+  SENT: 'var(--success)',
+  FAILED: 'var(--error)',
+  RATE_LIMITED: 'var(--warning)',
+  CANCELLED: 'var(--faint)',
 };
 
 export default function StatusBadge({ status }: StatusBadgeProps) {

@@ -23,12 +23,13 @@ export default function EmptyState({ title, description, icon = 'scheduled', act
       }}
     >
       <div
+        className="empty-state-icon"
         style={{
           width: 72,
           height: 72,
           borderRadius: '50%',
-          background: 'rgba(99, 102, 241, 0.1)',
-          border: '1px solid rgba(99, 102, 241, 0.2)',
+          background: 'var(--canvas-soft)',
+          border: '1px solid var(--hairline-soft)',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
@@ -36,9 +37,9 @@ export default function EmptyState({ title, description, icon = 'scheduled', act
         }}
       >
         {icon === 'sent' ? (
-          <Send size={28} color="#818cf8" />
+          <Send size={28} color="currentColor" />
         ) : (
-          <Mail size={28} color="#818cf8" />
+          <Mail size={28} color="currentColor" />
         )}
       </div>
       <h3 style={{ fontSize: 18, fontWeight: 600, color: 'var(--text-primary)' }}>{title}</h3>

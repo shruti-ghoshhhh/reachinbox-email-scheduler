@@ -4,11 +4,12 @@ import { authenticateJWT, type AuthRequest } from '../middleware/auth';
 import { emailQueue, getQueueStats } from '../queues/emailQueue';
 import { reconcileScheduledEmailJobs } from '../services/emailQueueReconciliation';
 import { indexEmailJobsBulk, searchEmailJobs } from '../config/elasticsearch';
-import { getRateLimitStatus } from '../services/rateLimitService';
+import { getEffectiveSendSpacing, getRateLimitStatus } from '../services/rateLimitService';
 import { getEtherealSenderAccounts } from '../services/etherealService';
 import { env } from '../config/env';
 import { v4 as uuidv4 } from 'uuid';
 import { z } from 'zod';
+import { parsePagination } from '../services/pagination';
 
 const router = Router();
 
@@ -23,7 +24,8 @@ const scheduleSchema = z.object({
   subject: z.string().min(1),
   body: z.string().min(1),
   startAt: z.string().datetime(),
-  delayBetweenEmailsMs: z.number().int().min(0).max(3600000).default(2000),
+  delayBetweenEmailsMs: z.number().int().min(0).max(3600000)
+    .default(env.EMAIL_SEND_DELAY_MS).transform(getEffectiveSendSpacing),
   hourlyLimit: z.number().int().min(1).max(10000).optional(),
   campaignId: z.string().optional(),
 });
@@ -87,6 +89,8 @@ router.post('/schedule', async (req: AuthRequest, res: Response) => {
       const scheduledAt = new Date(
         startTime.getTime() + hourOffset * hourStrideMs + posInHour * delayBetweenEmailsMs
       );
+      // Request-level dedupe is stored separately from BullMQ transport IDs.
+      // Hash user/sender/content/time so punctuation cannot break the queue ID.
       const idempotencyKey = `${userId}_${sender.id}_${recipient}_${subject}_${scheduledAt.getTime()}`;
       return { recipient, scheduledAt, idempotencyKey };
     });
@@ -168,9 +172,12 @@ router.post('/schedule', async (req: AuthRequest, res: Response) => {
 
 // ── Get Scheduled Emails ───────────────────────────────────────────────────
 router.get('/scheduled', async (req: AuthRequest, res: Response) => {
-  const page = parseInt((req.query.page as string) ?? '1', 10);
-  const limit = parseInt((req.query.limit as string) ?? '20', 10);
-  const skip = (page - 1) * limit;
+  const pagination = parsePagination(req.query.page, req.query.limit);
+  if (!pagination) {
+    res.status(400).json({ success: false, message: 'page must be a positive integer and limit must be an integer from 1 to 100' });
+    return;
+  }
+  const { page, limit, skip } = pagination;
   const search = req.query.search as string | undefined;
 
   try {
@@ -225,9 +232,12 @@ router.get('/scheduled', async (req: AuthRequest, res: Response) => {
 
 // ── Get Sent Emails ────────────────────────────────────────────────────────
 router.get('/sent', async (req: AuthRequest, res: Response) => {
-  const page = parseInt((req.query.page as string) ?? '1', 10);
-  const limit = parseInt((req.query.limit as string) ?? '20', 10);
-  const skip = (page - 1) * limit;
+  const pagination = parsePagination(req.query.page, req.query.limit);
+  if (!pagination) {
+    res.status(400).json({ success: false, message: 'page must be a positive integer and limit must be an integer from 1 to 100' });
+    return;
+  }
+  const { page, limit, skip } = pagination;
   const search = req.query.search as string | undefined;
 
   try {
@@ -276,6 +286,55 @@ router.get('/sent', async (req: AuthRequest, res: Response) => {
   } catch (err) {
     console.error('Get sent error:', err);
     res.status(500).json({ success: false, message: 'Failed to fetch sent emails' });
+  }
+});
+
+// Held deliveries must be inspectable without placing them back in the queue.
+router.get('/review', async (req: AuthRequest, res: Response) => {
+  const pagination = parsePagination(req.query.page, req.query.limit);
+  if (!pagination) {
+    res.status(400).json({ success: false, message: 'page must be a positive integer and limit must be an integer from 1 to 100' });
+    return;
+  }
+  const { page, limit, skip } = pagination;
+  if (req.query.search !== undefined && typeof req.query.search !== 'string') {
+    res.status(400).json({ success: false, message: 'search must be a string' });
+    return;
+  }
+  try {
+    const search = (req.query.search as string | undefined)?.trim();
+    const where = {
+      userId: req.authUser!.userId,
+      status: 'DELIVERY_UNKNOWN' as const,
+      ...(search ? { OR: [
+        { recipientEmail: { contains: search, mode: 'insensitive' as const } },
+        { subject: { contains: search, mode: 'insensitive' as const } },
+        { deliveryMessageId: { contains: search, mode: 'insensitive' as const } },
+      ] } : {}),
+    };
+    // Investigation must remain available even if the search index is delayed.
+    const [total, jobs] = await Promise.all([
+      prisma.emailJob.count({ where }),
+      prisma.emailJob.findMany({
+        where,
+        include: { sender: { select: { email: true, name: true } } },
+        orderBy: [{ updatedAt: 'desc' }, { id: 'asc' }],
+        skip,
+        take: limit,
+      }),
+    ]);
+    res.json({
+      success: true,
+      data: jobs.map(({ sender, claimToken: _claimToken, ...job }) => ({
+        ...job,
+        senderEmail: sender.email,
+        senderName: sender.name,
+      })),
+      total, page, limit, totalPages: Math.ceil(total / limit),
+    });
+  } catch (err) {
+    console.error('Get review emails error:', err);
+    res.status(500).json({ success: false, message: 'Failed to fetch emails needing review' });
   }
 });
 

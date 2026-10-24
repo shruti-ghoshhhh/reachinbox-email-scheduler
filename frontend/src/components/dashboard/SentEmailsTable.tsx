@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { Fragment, useState, useEffect, useCallback, useRef } from 'react';
 import { format } from 'date-fns';
 import { ExternalLink, Search, RefreshCw, ChevronLeft, ChevronRight } from 'lucide-react';
 import { api } from '@/lib/api';
@@ -22,11 +22,20 @@ function SkeletonRow() {
 
 interface SentEmailsTableProps {
   refreshTrigger?: number;
+  mode?: 'sent' | 'review';
 }
 
-export default function SentEmailsTable({ refreshTrigger }: SentEmailsTableProps) {
+export default function SentEmailsTable({ refreshTrigger, mode = 'sent' }: SentEmailsTableProps) {
+  const isReview = mode === 'review';
+  const listLabel = isReview ? 'emails needing review' : 'sent emails';
+  const dateLabel = isReview ? 'Attempt started' : 'Sent At';
   const [emails, setEmails] = useState<EmailJob[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const hasLoaded = useRef(false);
+  const latestRequest = useRef(0);
+  const blockingRequest = useRef(false);
+  const refreshRequest = useRef(false);
   const [loadError, setLoadError] = useState(false);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -35,9 +44,18 @@ export default function SentEmailsTable({ refreshTrigger }: SentEmailsTableProps
   const LIMIT = 10;
   const totalPages = Math.ceil(total / LIMIT);
 
-  const fetchEmails = useCallback(async () => {
-    setIsLoading(true);
-    setLoadError(false);
+  const fetchEmails = useCallback(async (showLoading = true) => {
+    const blocking = showLoading || !hasLoaded.current;
+    if (!blocking && (blockingRequest.current || refreshRequest.current)) return;
+    const requestId = ++latestRequest.current;
+    if (blocking) {
+      blockingRequest.current = true;
+      setIsLoading(true);
+      setLoadError(false);
+    } else {
+      refreshRequest.current = true;
+      setIsRefreshing(true);
+    }
     try {
       const params = new URLSearchParams({
         page: String(page),
@@ -45,20 +63,30 @@ export default function SentEmailsTable({ refreshTrigger }: SentEmailsTableProps
         ...(search ? { search } : {}),
       });
       const res = await api.get<PaginatedResponse<EmailJob>>(
-        `/api/emails/sent?${params}`
+        `/api/emails/${mode}?${params}`
       );
-      if (res.success) {
+      if (requestId === latestRequest.current && res.success) {
         setEmails(res.data);
         setTotal(res.total);
       }
     } catch {
-      setEmails([]);
-      setTotal(0);
-      setLoadError(true);
+      if (requestId === latestRequest.current && blocking) {
+        setEmails([]);
+        setTotal(0);
+        setLoadError(true);
+      }
     } finally {
-      setIsLoading(false);
+      if (requestId === latestRequest.current) {
+        hasLoaded.current = true;
+        blockingRequest.current = false;
+        refreshRequest.current = false;
+        if (blocking) setIsLoading(false);
+        setIsRefreshing(false);
+      } else if (!blocking) {
+        refreshRequest.current = false;
+      }
     }
-  }, [page, search]);
+  }, [page, search, mode]);
 
   useEffect(() => {
     const timeout = setTimeout(() => void fetchEmails(), 0);
@@ -66,7 +94,7 @@ export default function SentEmailsTable({ refreshTrigger }: SentEmailsTableProps
   }, [fetchEmails, refreshTrigger]);
 
   useEffect(() => {
-    const interval = setInterval(fetchEmails, 15000);
+    const interval = setInterval(() => void fetchEmails(false), 15000);
     return () => clearInterval(interval);
   }, [fetchEmails]);
 
@@ -78,6 +106,13 @@ export default function SentEmailsTable({ refreshTrigger }: SentEmailsTableProps
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {isReview && (
+        <div className="review-notice">
+          <strong>Delivery needs verification</strong>
+          <p>The provider may have received these emails. Automatic retries are paused to prevent duplicates.</p>
+          <p>Open attempt details, then check the sender’s Ethereal inbox or provider logs using the message ID, recipient and attempt time. Keep the email on hold until the outcome is confirmed; do not schedule a replacement while delivery is uncertain.</p>
+        </div>
+      )}
       {/* Toolbar */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
         <form onSubmit={handleSearch} style={{ display: 'flex', gap: 8, flex: 1, maxWidth: 360 }}>
@@ -87,7 +122,8 @@ export default function SentEmailsTable({ refreshTrigger }: SentEmailsTableProps
               value={searchInput}
               onChange={(e) => setSearchInput(e.target.value)}
               className="input-field"
-              placeholder="Search sent emails..."
+              placeholder={isReview ? 'Search recipient, subject or message ID...' : 'Search sent emails...'}
+              aria-label={`Search ${listLabel}`}
               style={{ paddingLeft: 34, fontSize: 13 }}
             />
           </div>
@@ -95,20 +131,13 @@ export default function SentEmailsTable({ refreshTrigger }: SentEmailsTableProps
             Search
           </button>
         </form>
-        <button onClick={fetchEmails} className="btn-secondary" style={{ padding: '8px 12px' }}>
-          <RefreshCw size={14} />
+        <button onClick={() => void fetchEmails(false)} className="btn-secondary" style={{ padding: '8px 12px' }} aria-label={`Refresh ${listLabel}`} title={`Refresh ${listLabel}`}>
+          <RefreshCw size={14} className={isRefreshing ? 'animate-spin-slow' : undefined} />
         </button>
       </div>
 
       {/* Table */}
-      <div
-        style={{
-          background: 'var(--bg-card)',
-          border: '1px solid var(--border)',
-          borderRadius: 12,
-          overflow: 'hidden',
-        }}
-      >
+      <div className="table-frame">
         {isLoading ? (
           <table className="data-table">
             <thead>
@@ -116,9 +145,9 @@ export default function SentEmailsTable({ refreshTrigger }: SentEmailsTableProps
                 <th>Recipient</th>
                 <th>Subject</th>
                 <th>Sender</th>
-                <th>Sent At</th>
+                <th>{dateLabel}</th>
                 <th>Status</th>
-                <th>Preview</th>
+                <th>{isReview ? 'Investigation' : 'Preview'}</th>
               </tr>
             </thead>
             <tbody>
@@ -127,12 +156,12 @@ export default function SentEmailsTable({ refreshTrigger }: SentEmailsTableProps
           </table>
         ) : loadError ? (
           <div role="alert" style={{ padding: 24, color: 'var(--text-muted)', textAlign: 'center' }}>
-            Could not load sent emails. Check your connection and try again.
+            Could not load {listLabel}. Check your connection and try again.
           </div>
         ) : emails.length === 0 ? (
           <EmptyState
-            title="No Sent Emails"
-            description="Emails sent via your campaigns will appear here once they're delivered."
+            title={search ? 'No matching emails' : isReview ? 'No emails need review' : 'No Sent Emails'}
+            description={search ? 'Try a different recipient, subject or message ID.' : isReview ? 'Any delivery with an uncertain outcome will appear here for investigation.' : "Emails sent via your campaigns will appear here once they're delivered."}
             icon="sent"
           />
         ) : (
@@ -142,13 +171,14 @@ export default function SentEmailsTable({ refreshTrigger }: SentEmailsTableProps
                 <th>Recipient</th>
                 <th>Subject</th>
                 <th>Sender</th>
-                <th>Sent At</th>
+                <th>{dateLabel}</th>
                 <th>Status</th>
-                <th>Preview</th>
+                <th>{isReview ? 'Investigation' : 'Preview'}</th>
               </tr>
             </thead>
             <tbody>
               {emails.map((email) => (
+                <Fragment key={email.id}>
                 <tr key={email.id}>
                   <td style={{ color: 'var(--text-primary)', fontWeight: 500 }}>
                     {email.recipientEmail}
@@ -160,15 +190,15 @@ export default function SentEmailsTable({ refreshTrigger }: SentEmailsTableProps
                   </td>
                   <td>{email.senderEmail}</td>
                   <td>
-                    {email.sentAt
-                      ? format(new Date(email.sentAt), 'MMM d, yyyy HH:mm')
+                    {(isReview ? email.deliveryAttemptStartedAt : email.sentAt)
+                      ? format(new Date((isReview ? email.deliveryAttemptStartedAt : email.sentAt)!), 'MMM d, yyyy HH:mm:ss')
                       : '—'}
                   </td>
                   <td>
                     <StatusBadge status={email.status} />
                   </td>
                   <td>
-                    {email.previewUrl ? (
+                    {isReview ? 'Held for review' : email.previewUrl ? (
                       <a
                         href={email.previewUrl}
                         target="_blank"
@@ -189,6 +219,25 @@ export default function SentEmailsTable({ refreshTrigger }: SentEmailsTableProps
                     ) : '—'}
                   </td>
                 </tr>
+                {isReview && (
+                  <tr>
+                    <td colSpan={6}>
+                      <details className="review-details">
+                        <summary>Attempt details for {email.recipientEmail}</summary>
+                        <dl>
+                          <dt>Email ID</dt><dd>{email.id}</dd>
+                          <dt>Message ID</dt><dd>{email.deliveryMessageId ?? 'Not recorded — investigate by recipient and attempt time'}</dd>
+                          <dt>Last error</dt><dd>{email.errorMessage ?? 'No error details recorded'}</dd>
+                          <dt>Retry count</dt><dd>{email.retryCount}</dd>
+                          <dt>Last updated</dt><dd>{format(new Date(email.updatedAt), 'PPpp')}</dd>
+                          <dt>Scheduled for</dt><dd>{format(new Date(email.scheduledAt), 'PPpp')}</dd>
+                          <dt>Message body</dt><dd className="review-body">{email.body}</dd>
+                        </dl>
+                      </details>
+                    </td>
+                  </tr>
+                )}
+                </Fragment>
               ))}
             </tbody>
           </table>
@@ -205,6 +254,7 @@ export default function SentEmailsTable({ refreshTrigger }: SentEmailsTableProps
             <button
               onClick={() => setPage((p) => Math.max(1, p - 1))}
               disabled={page === 1}
+              aria-label="Previous page"
               className="btn-secondary"
               style={{ padding: '6px 10px', opacity: page === 1 ? 0.4 : 1 }}
             >
@@ -213,6 +263,7 @@ export default function SentEmailsTable({ refreshTrigger }: SentEmailsTableProps
             <button
               onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
               disabled={page === totalPages}
+              aria-label="Next page"
               className="btn-secondary"
               style={{ padding: '6px 10px', opacity: page === totalPages ? 0.4 : 1 }}
             >

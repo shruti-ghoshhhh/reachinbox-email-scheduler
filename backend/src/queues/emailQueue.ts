@@ -1,10 +1,13 @@
 import { Queue } from 'bullmq';
 import { redisConnection } from '../config/redis';
 
-export const EMAIL_QUEUE_NAME = 'email-scheduler';
+// Keep the production queue as the default while allowing an isolated queue
+// for controlled worker checks and local maintenance tasks.
+export const EMAIL_QUEUE_NAME = process.env.EMAIL_QUEUE_NAME || 'email-scheduler';
 
 export interface EmailJobData {
   emailJobId: string;
+  campaignId?: string | null;
   userId: string;
   senderId: string;
   senderEmail: string;
@@ -50,7 +53,9 @@ export async function scheduleEmailJob(
     'send-email',
     data,
     {
-      jobId: data.idempotencyKey, // BullMQ deduplicates by jobId
+      // BullMQ custom IDs forbid ':'. Database UUID is transport-safe and
+      // request deduplication remains enforced by the PostgreSQL unique key.
+      jobId: `email-${data.emailJobId}`,
       delay,
     }
   );

@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { useRouter, useSearchParams } from 'next/navigation';
+import { useRouter } from 'next/navigation';
 import { useAuth } from '@/contexts/AuthContext';
 import { FullPageLoader } from '@/components/ui/LoadingSpinner';
 import Header from '@/components/dashboard/Header';
@@ -9,23 +9,22 @@ import StatsBar from '@/components/dashboard/StatsBar';
 import ScheduledEmailsTable from '@/components/dashboard/ScheduledEmailsTable';
 import SentEmailsTable from '@/components/dashboard/SentEmailsTable';
 import ComposeModal from '@/components/dashboard/ComposeModal';
-import { Plus, Clock, Send, LayoutDashboard, ExternalLink } from 'lucide-react';
+import { Plus, Clock, Send, ExternalLink, TriangleAlert } from 'lucide-react';
 import { api } from '@/lib/api';
 import { ApiResponse } from '@/types';
 import toast from 'react-hot-toast';
-import { Suspense } from 'react';
 import { API_BASE } from '@/lib/api';
 
-type Tab = 'scheduled' | 'sent';
+type Tab = 'scheduled' | 'sent' | 'review';
 
 function DashboardInner() {
   const { user, isLoading } = useAuth();
   const router = useRouter();
-  const searchParams = useSearchParams();
   const [activeTab, setActiveTab] = useState<Tab>('scheduled');
   const [showCompose, setShowCompose] = useState(false);
   const [refreshTrigger, setRefreshTrigger] = useState(0);
-  const [slackConnected, setSlackConnected] = useState(false);
+  const [slackConnectionStatus, setSlackConnectionStatus] = useState<boolean | null>(null);
+  const slackConnected = slackConnectionStatus ?? user?.slackConnected ?? false;
 
   useEffect(() => {
     if (!isLoading && !user) {
@@ -39,20 +38,21 @@ function DashboardInner() {
     api
       .get<ApiResponse<{ connected: boolean }>>('/api/slack/status')
       .then((res) => {
-        if (res.success) setSlackConnected(res.data?.connected ?? false);
+        if (res.success) setSlackConnectionStatus(res.data?.connected ?? false);
       })
       .catch(() => {});
   }, [user]);
 
   // Handle Slack callback params
   useEffect(() => {
-    if (searchParams.get('slack_connected') === 'true') {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('slack_connected') === 'true') {
       toast.success('✅ Slack connected successfully!');
     }
-    if (searchParams.get('slack_error') === 'true') {
+    if (params.get('slack_error') === 'true') {
       toast.error('Failed to connect Slack. Please try again.');
     }
-  }, [searchParams]);
+  }, []);
 
   const handleSlackConnect = async () => {
     try {
@@ -60,6 +60,16 @@ function DashboardInner() {
       window.location.assign(result.url);
     } catch {
       toast.error('Could not start Slack connection. Please try again.');
+    }
+  };
+
+  const handleSlackDisconnect = async () => {
+    try {
+      await api.delete<ApiResponse<unknown>>('/api/slack/disconnect');
+      setSlackConnectionStatus(false);
+      toast.success('Slack disconnected. Reconnect any time to resume alerts.');
+    } catch {
+      toast.error('Could not disconnect Slack. Please try again.');
     }
   };
 
@@ -72,38 +82,32 @@ function DashboardInner() {
   if (!user) return null;
 
   return (
-    <div style={{ minHeight: '100vh', background: 'var(--bg-primary)' }}>
-      <Header onSlackConnect={handleSlackConnect} slackConnected={slackConnected} />
+    <div className="dashboard-shell">
+      <Header onSlackConnect={handleSlackConnect} onSlackDisconnect={handleSlackDisconnect} slackConnected={slackConnected} />
 
-      <main style={{ maxWidth: 1280, margin: '0 auto', padding: '28px 24px' }}>
+      <main className="dashboard-main">
         {/* Page header */}
         <div
-          style={{
-            display: 'flex',
-            alignItems: 'flex-start',
-            justifyContent: 'space-between',
-            marginBottom: 24,
-          }}
+          className="dashboard-heading"
         >
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <LayoutDashboard size={22} color="var(--accent)" />
+          <div>
             <div>
-              <h2 style={{ fontSize: 22, fontWeight: 700, color: 'var(--text-primary)' }}>
-                Dashboard
+              <h2 className="dashboard-title">
+                Campaigns.
               </h2>
-              <p style={{ fontSize: 13, color: 'var(--text-muted)', marginTop: 2 }}>
-                Manage your email campaigns and track delivery
+              <p className="dashboard-subtitle">
+                Keep every send on schedule and every delivery in view.
               </p>
             </div>
           </div>
 
-          <div style={{ display: 'flex', gap: 10 }}>
+          <div className="dashboard-actions">
             <a
               href={`${API_BASE}/admin/queues`}
               target="_blank"
               rel="noopener noreferrer"
               className="btn-secondary"
-              style={{ fontSize: 13, textDecoration: 'none' }}
+              style={{ textDecoration: 'none' }}
             >
               <ExternalLink size={14} />
               Queue Board
@@ -111,7 +115,6 @@ function DashboardInner() {
             <button
               onClick={() => setShowCompose(true)}
               className="btn-primary"
-              style={{ fontSize: 14 }}
             >
               <Plus size={16} />
               Compose New Email
@@ -120,62 +123,46 @@ function DashboardInner() {
         </div>
 
         {/* Stats */}
-        <div style={{ marginBottom: 28 }}>
+        <div>
           <StatsBar />
         </div>
 
         {/* Tabs */}
-        <div style={{ marginBottom: 20 }}>
-          <div
-            style={{
-              display: 'inline-flex',
-              background: 'var(--bg-card)',
-              border: '1px solid var(--border)',
-              borderRadius: 10,
-              padding: 4,
-              gap: 2,
-            }}
-          >
+        <section className="email-section">
+          <div className="section-topline">
+            <div>
+              <h3 className="section-title">Email activity</h3>
+              <p className="section-caption">Search, review, and manage your delivery queue.</p>
+            </div>
+            <div className="segmented" role="group" aria-label="Email activity view">
             {([
               { key: 'scheduled', label: 'Scheduled', icon: <Clock size={14} /> },
               { key: 'sent', label: 'Sent', icon: <Send size={14} /> },
+              { key: 'review', label: 'Needs review', icon: <TriangleAlert size={14} /> },
             ] as { key: Tab; label: string; icon: React.ReactNode }[]).map(({ key, label, icon }) => (
               <button
                 key={key}
                 onClick={() => setActiveTab(key)}
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 7,
-                  padding: '8px 18px',
-                  borderRadius: 7,
-                  border: 'none',
-                  cursor: 'pointer',
-                  fontSize: 13,
-                  fontWeight: 600,
-                  transition: 'all 0.2s',
-                  background: activeTab === key
-                    ? 'linear-gradient(135deg, #6366f1, #4f46e5)'
-                    : 'transparent',
-                  color: activeTab === key ? 'white' : 'var(--text-muted)',
-                  boxShadow: activeTab === key ? '0 2px 8px rgba(99, 102, 241, 0.3)' : 'none',
-                }}
+                aria-pressed={activeTab === key}
               >
                 {icon}
                 {label}
               </button>
             ))}
+            </div>
           </div>
-        </div>
 
         {/* Content */}
         <div className="animate-fade-in" key={activeTab}>
           {activeTab === 'scheduled' ? (
             <ScheduledEmailsTable refreshTrigger={refreshTrigger} />
-          ) : (
+          ) : activeTab === 'sent' ? (
             <SentEmailsTable refreshTrigger={refreshTrigger} />
+          ) : (
+            <SentEmailsTable refreshTrigger={refreshTrigger} mode="review" />
           )}
         </div>
+        </section>
       </main>
 
       <ComposeModal
@@ -188,9 +175,5 @@ function DashboardInner() {
 }
 
 export default function DashboardPage() {
-  return (
-    <Suspense fallback={<FullPageLoader />}>
-      <DashboardInner />
-    </Suspense>
-  );
+  return <DashboardInner />;
 }

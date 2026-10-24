@@ -1,5 +1,6 @@
 import { prisma } from '../config/database';
 import { env } from '../config/env';
+import { postSlackRateLimitMessage } from './slackNotificationDelivery';
 
 /**
  * Slack OAuth & notification service.
@@ -99,79 +100,19 @@ export async function sendSlackRateLimitNotification(
   userId: string,
   senderEmail: string,
   hourlyLimit: number,
-  nextWindowAt: Date
-): Promise<void> {
+  nextWindowAt: Date,
+  clientMsgId?: string,
+): Promise<boolean> {
   const user = await prisma.user.findUnique({
     where: { id: userId },
     select: { slackToken: true, slackUserId: true, slackConnected: true },
   });
 
-  if (!user?.slackConnected || !user.slackToken) {
+  if (!user?.slackConnected || !user.slackToken || !user.slackUserId) {
     console.log(`ℹ️  No Slack connected for user ${userId}, skipping notification`);
-    return;
+    return false;
   }
-
-  const message = {
-    channel: user.slackUserId!, // DM to the user
-    blocks: [
-      {
-        type: 'header',
-        text: {
-          type: 'plain_text',
-          text: '⚠️ Email Rate Limit Reached',
-          emoji: true,
-        },
-      },
-      {
-        type: 'section',
-        fields: [
-          {
-            type: 'mrkdwn',
-            text: `*Sender:*\n${senderEmail}`,
-          },
-          {
-            type: 'mrkdwn',
-            text: `*Hourly Limit:*\n${hourlyLimit} emails/hour`,
-          },
-        ],
-      },
-      {
-        type: 'section',
-        text: {
-          type: 'mrkdwn',
-          text: `Emails from *${senderEmail}* have been delayed to the next window.\n\n*Next window opens at:* ${nextWindowAt.toLocaleTimeString()}`,
-        },
-      },
-      {
-        type: 'context',
-        elements: [
-          {
-            type: 'mrkdwn',
-            text: `ReachInbox Email Scheduler • ${new Date().toISOString()}`,
-          },
-        ],
-      },
-    ],
-  };
-
-  try {
-    const response = await fetch('https://slack.com/api/chat.postMessage', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${user.slackToken}`,
-      },
-      body: JSON.stringify(message),
-    });
-
-    const result = await response.json() as { ok: boolean; error?: string };
-
-    if (!result.ok) {
-      console.error(`❌ Slack notification failed: ${result.error}`);
-    } else {
-      console.log(`✅ Slack rate limit notification sent for sender ${senderEmail}`);
-    }
-  } catch (error) {
-    console.error('❌ Failed to send Slack notification:', (error as Error).message);
-  }
+  await postSlackRateLimitMessage(user.slackToken, user.slackUserId, { senderEmail, hourlyLimit, nextWindowAt, clientMsgId });
+  console.log(`✅ Slack rate limit notification sent for sender ${senderEmail}`);
+  return true;
 }

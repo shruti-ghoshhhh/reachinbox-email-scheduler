@@ -2,6 +2,7 @@ import type { EmailJobData } from '../queues/emailQueue';
 
 export interface PersistedEmailJob {
   id: string;
+  campaignId?: string | null;
   idempotencyKey: string;
   userId: string;
   senderId: string;
@@ -11,6 +12,7 @@ export interface PersistedEmailJob {
   scheduledAt: Date;
   hourlyLimit: number;
   delayBetweenEmailsMs: number;
+  bullJobId?: string | null;
   sender: { email: string; name: string };
 }
 
@@ -23,6 +25,7 @@ export type MarkEnqueued = (job: PersistedEmailJob, bullJobId: string) => Promis
 export function buildEmailJobData(job: PersistedEmailJob): EmailJobData {
   return {
     emailJobId: job.id,
+    campaignId: job.campaignId,
     userId: job.userId,
     senderId: job.senderId,
     senderEmail: job.sender.email,
@@ -58,7 +61,7 @@ export async function enqueuePersistedEmailJobs(
     const results = await Promise.all(batch.map(async (job) => {
       try {
         const bullJob = await queue.add('send-email', buildEmailJobData(job), {
-          jobId: job.idempotencyKey,
+          jobId: job.bullJobId || `email-${job.id}`,
           delay: Math.max(0, job.scheduledAt.getTime() - now),
         });
         if (!bullJob.id) throw new Error(`BullMQ returned no id for ${job.id}`);

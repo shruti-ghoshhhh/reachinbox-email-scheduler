@@ -2,16 +2,19 @@
 
 import { useRef, useState } from 'react';
 import { Upload, X, FileText, CheckCircle2 } from 'lucide-react';
+import Papa from 'papaparse';
 
 interface CsvUploaderProps {
   onEmailsParsed: (emails: string[]) => void;
 }
 
 function parseEmails(text: string): string[] {
-  const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
-  const matches = text.match(emailRegex) ?? [];
-  // Deduplicate
-  return [...new Set(matches)];
+  const addressPattern = /^[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Z0-9](?:[A-Z0-9-]*[A-Z0-9])?(?:\.[A-Z0-9](?:[A-Z0-9-]*[A-Z0-9])?)+$/i;
+  const cells = Papa.parse<string[]>(text, { skipEmptyLines: true }).data.flat();
+  const normalized = cells.flatMap((cell) => cell.trim().split(/[\s;]+/))
+    .filter((token) => addressPattern.test(token))
+    .map((address) => address.toLowerCase());
+  return [...new Set(normalized)];
 }
 
 export default function CsvUploader({ onEmailsParsed }: CsvUploaderProps) {
@@ -55,12 +58,12 @@ export default function CsvUploader({ onEmailsParsed }: CsvUploaderProps) {
           onDrop={handleDrop}
           onClick={() => inputRef.current?.click()}
           style={{
-            border: `2px dashed ${dragging ? 'var(--accent)' : 'var(--border)'}`,
+            border: `1px dashed ${dragging ? 'var(--ink)' : 'var(--border-hover)'}`,
             borderRadius: 10,
             padding: '28px 20px',
             textAlign: 'center',
             cursor: 'pointer',
-            background: dragging ? 'rgba(99, 102, 241, 0.05)' : 'var(--bg-secondary)',
+            background: 'var(--bg-secondary)',
             transition: 'all 0.2s ease',
           }}
         >
@@ -109,6 +112,7 @@ export default function CsvUploader({ onEmailsParsed }: CsvUploaderProps) {
             )}
           </div>
           <button
+            type="button"
             onClick={clear}
             style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', padding: 4 }}
           >
